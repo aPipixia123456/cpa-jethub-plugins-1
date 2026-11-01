@@ -1126,12 +1126,14 @@ func expiryCell(expiry, now time.Time) template.HTML {
 	if expiry.IsZero() {
 		return plugui.Group(cellText("未知"), cellSub("以服务端 100002 为准"))
 	}
-	date := cellSub(expiry.Local().Format("01-02 15:04"))
-	remaining := expiry.Sub(now)
-	if remaining <= 0 {
-		return plugui.Group(cellText("已过期"), date)
+	left := "已过期"
+	if remaining := expiry.Sub(now); remaining > 0 {
+		left = "剩 " + spanText(remaining)
 	}
-	return plugui.Group(cellText("剩 "+spanText(remaining)), date)
+	// Neither half may wrap inside a narrow column: 11-12 / 18:53 on two lines
+	// reads as two values.
+	return template.HTML(`<span class="nowrap">` + template.HTMLEscapeString(left) + `</span>` +
+		`<span class="sub nowrap">` + template.HTMLEscapeString(expiry.Local().Format("01-02 15:04")) + `</span>`)
 }
 
 // spanText renders a duration in its largest whole unit: 9 天, 5 小时, 12 分钟.

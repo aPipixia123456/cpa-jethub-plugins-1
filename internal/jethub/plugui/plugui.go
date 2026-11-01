@@ -115,6 +115,7 @@ a { color: var(--primary-color, #1f6feb); }
 .qr-missing { text-align: center; color: var(--text-secondary, #59636e); padding: 24px 0; }
 .badge {
   display: inline-block;
+  white-space: nowrap;
   border-radius: 999px;
   padding: 1px 9px;
   font-size: 12px;
@@ -125,6 +126,7 @@ a { color: var(--primary-color, #1f6feb); }
 .badge.warning { border-color: var(--warning-color, #9a6700); color: var(--warning-color, #9a6700); }
 .badge.danger  { border-color: var(--danger-color, #cf222e);  color: var(--danger-color, #cf222e); }
 .muted { color: var(--text-secondary, #59636e); }
+.nowrap { white-space: nowrap; }
 /* catalogue: the filter and the model table. A model's routing name gets its own
    quiet line so the provider's own name stays the prominent one. */
 .cat-filter { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
@@ -198,9 +200,11 @@ table.data .row-actions .btn { padding: 2px 10px; font-size: 12px; white-space: 
     margin: 0 0 10px;
   }
   table.data tbody tr:hover td { background: none; }
-  table.data td { border: none; padding: 5px 0; display: flex; justify-content: space-between; gap: 12px; text-align: right; }
-  table.data td::before { content: attr(data-label); color: var(--text-secondary, #59636e); text-align: left; flex: 0 0 auto; }
-  table.data td .sub { text-align: right; }
+  /* The column name floats left and the value stacks on the right, so a cell
+     with a second line (.sub) keeps it under its value. */
+  table.data td { border: none; padding: 5px 0; text-align: right; }
+  table.data td::before { content: attr(data-label); float: left; margin-right: 12px; color: var(--text-secondary, #59636e); }
+  table.data td::after { content: ""; display: block; clear: both; }
   table.data .row-actions { justify-content: flex-end; }
 }
 /* collapsible: a folded card that opens without any script. */
