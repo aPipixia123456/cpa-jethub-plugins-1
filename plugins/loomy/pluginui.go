@@ -8,6 +8,7 @@ import (
 
 	"github.com/collegeming/cpa-jethub-plugins/internal/abiboot"
 	"github.com/collegeming/cpa-jethub-plugins/internal/jethub/plugui"
+	"github.com/collegeming/cpa-jethub-plugins/plugins/loomy/pool"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -29,11 +30,17 @@ func pluguiPage(heading string, body ...template.HTML) pluginapi.ManagementRespo
 	return plugui.HTML(heading, body...)
 }
 
-// renderStatusPage renders the account overview, the model catalogue and the two
-// point pools.
+// renderStatusPage renders the account overview: a summary, one table row per
+// account with that account's own point pools and actions, the model catalogue
+// and the plugin settings (folded).
+//
+// Points come from the snapshots the pool sweep and earlier views already took,
+// so a view costs no upstream call once an account has been read, and every row
+// says how old its figures are. ?refresh=1 reads every account again, still one
+// account at a time (collectAccountQuotas explains why).
 func renderStatusPage(h *abiboot.Host, request pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 	cfg := settings()
-	body := []template.HTML{plugui.Card("插件设置", plugui.Group(plugui.Fields(
+	settingsCard := plugui.Collapsible("插件设置", plugui.Fields(
 		plugui.Field{Label: "推理端点", Value: APIBase + ChatCompletionsPath},
 		plugui.Field{Label: "账号端点", Value: AccountBase},
 		plugui.Field{Label: "模型目录", Value: catalogueModeText(cfg)},
@@ -43,102 +50,207 @@ func renderStatusPage(h *abiboot.Host, request pluginapi.ManagementRequest) plug
 		plugui.Field{Label: "登录页", Value: loginResourcePath},
 		plugui.Field{Label: "会话续期", Value: "不支持：Loomy 没有 refresh 端点，" +
 			"auth.refresh 只对 " + PointsRecordsPath + " 做一次有效性探测"},
-	)),
-		plugui.Action{Label: "刷新目录", Query: "action=refresh-catalog", Kind: "primary"},
-		plugui.Action{Label: "账号池", Path: "pool"},
-	)}
+	))
 
 	accounts := loomyAccounts(h)
 	if len(accounts) == 0 {
-		body = append(body, plugui.Card("尚未添加账号",
-			plugui.Notice("warning", "当前实例还没有 Loomy 账号。点下面的按钮进入自动接码登录："+
-				"确认后从接码平台取号 → 发短信 → 收码 → 保存凭据。微信扫码已关闭。"),
-			plugui.Action{Label: "自动接码登录", Path: "login", Kind: "primary"},
-			plugui.Action{Label: "账号池", Path: "pool"},
-		))
-		// The catalogue renders here too: it is the bundled table until a
-		// credential exists, and it answers "which models does this channel
-		// offer" without needing an account to be configured first.
-		body = append(body, catalogueCard(cfg))
-		return pluguiPage("Loomy", body...)
+		return pluguiPage("Loomy",
+			plugui.Card("尚未添加账号",
+				plugui.Notice("warning", "当前实例还没有 Loomy 账号。点下面的按钮进入自动接码登录："+
+					"确认后从接码平台取号 → 发短信 → 收码 → 保存凭据。微信扫码已关闭。"),
+				plugui.Action{Label: "自动接码登录", Path: "login", Kind: "primary"},
+				plugui.Action{Label: "账号池", Path: "pool"},
+			),
+			// The catalogue renders here too: it is the bundled table until a
+			// credential exists, and it answers "which models does this channel
+			// offer" without needing an account to be configured first.
+			catalogueCard(cfg),
+			settingsCard,
+		)
+	}
+	if _, found := selectAccount(h, request); !found {
+		return pluguiPage("Loomy",
+			plugui.Card("账号不存在", plugui.Notice("danger", "指定的 auth_index 不在本插件的账号列表里。"),
+				plugui.Action{Label: "返回全部账号", Path: "status"}),
+			settingsCard,
+		)
 	}
 
-	entry, found := selectAccount(h, request)
-	if !found {
-		body = append(body, plugui.Card("账号不存在",
-			plugui.Notice("danger", "指定的 auth_index 不在本插件的账号列表里。")))
-		return pluguiPage("Loomy", body...)
+	refresh := truthyParam(request.Query.Get("refresh"))
+	freshness := pointsAnyAge
+	if refresh {
+		freshness = pointsLive
 	}
-
-	// One sweep, one card per account: each card carries that account's own
-	// points, never the selected account's repeated.
-	quotas := collectAccountQuotas(h, accounts, cfg)
-	for _, quota := range quotas {
-		body = append(body, renderQuotaCard(quota, quota.Entry.AuthIndex == entry.AuthIndex))
+	started := time.Now()
+	quotas := collectQuotas(h, accounts, cfg, freshness)
+	var refreshNotice template.HTML
+	if refresh {
+		refreshNotice = plugui.Notice("success", fmt.Sprintf("已逐个重新读取 %d 个账号的积分，用时 %.1f 秒。",
+			len(quotas), time.Since(started).Seconds()))
 	}
-	body = append(body, renderAccountList(accounts, entry.AuthIndex))
-
 	// The catalogue is a property of the configuration, not of one account's
 	// credential: `catalogueForPage` reads this plugin's own cache and the
 	// bundled table, so the card renders even when a credential is unreadable.
-	body = append(body, catalogueCard(cfg))
-	return pluguiPage("Loomy", body...)
+	return plugui.HTMLWide("Loomy",
+		overviewCard(quotas, refreshNotice),
+		accountTableCard(quotas),
+		catalogueCard(cfg),
+		settingsCard,
+	)
 }
 
-// renderQuotaCard renders one account: its identity, its OWN point pools and its
-// own actions.
-//
-// The card title names the account, so ten cards stay tellable apart, and every
-// number shown belongs to the account in the title. The two pools are displayed
-// separately (an explicit user requirement, `README.md:1471-1474`), and a failed
-// read is stated as such — the card never falls back to 0 (trap #11).
-func renderQuotaCard(quota accountQuota, current bool) template.HTML {
-	entry := quota.Entry
-	fields := []plugui.Field{{Label: "状态", Value: statusText(entry)}}
-	if entry.AuthIndex != "" {
-		fields = append(fields, plugui.Field{Label: "索引", Value: entry.AuthIndex})
-	}
-	if quota.CredentialErr != nil {
-		fields = append(fields, plugui.Field{Label: "凭据", Value: "无法读取：" + quota.CredentialErr.Error()})
-	} else {
-		fields = append(fields,
-			plugui.Field{Label: "手机号", Value: quota.Credential.maskedPhone()},
-			plugui.Field{Label: "用户 ID", Value: emptyText(quota.Credential.UserID)},
-			plugui.Field{Label: "有效期至", Value: formatExpiry(quota.Credential.Expiry())},
-			plugui.Field{Label: "可自动续期", Value: "否（无 refresh_token，过期只能重新登录）"},
-		)
-		switch {
-		case quota.PointsErr != nil:
-			fields = append(fields, plugui.Field{Label: "积分", Value: "查询失败：" + quota.PointsErr.Error()})
-		case quota.PointsNone:
-			fields = append(fields, plugui.Field{Label: "积分", Value: "服务端未返回 balance 字段，无法给出积分数字（不显示 0）"})
-		default:
-			snapshot := quota.Snapshot
-			fields = append(fields,
-				plugui.Field{Label: "永久积分", Value: trimAmount(snapshot.Balance)},
-				plugui.Field{Label: "每日赠送", Value: trimAmount(snapshot.DailyBalance)},
-				plugui.Field{Label: "可用合计", Value: trimAmount(snapshot.Available)},
-			)
-			if snapshot.DailyQuota != nil {
-				fields = append(fields, plugui.Field{Label: "每日额度", Value: trimAmount(*snapshot.DailyQuota) + "（" + dailyQuotaDescription + "）"})
-			}
-			if snapshot.DailyConsumed != nil {
-				fields = append(fields, plugui.Field{Label: "今日已用", Value: trimAmount(*snapshot.DailyConsumed)})
-			}
-			if snapshot.DailyCycleDate != "" {
-				fields = append(fields, plugui.Field{Label: "额度日期", Value: snapshot.DailyCycleDate})
-			}
+// overviewCard sums the accounts up — how many there are, how many can serve,
+// the points they hold together and how old the oldest figure is — and carries
+// the page-wide actions.
+func overviewCard(quotas []accountQuota, notice template.HTML) template.HTML {
+	now := time.Now()
+	healthy, unread := 0, 0
+	var available, daily float64
+	var oldest time.Time
+	for _, quota := range quotas {
+		if tone, _ := accountState(quota, now); tone == "success" {
+			healthy++
+		}
+		if quota.Snapshot == nil {
+			unread++
+		} else {
+			available += quota.Snapshot.Available
+			daily += quota.Snapshot.DailyBalance
+		}
+		if !quota.Fetched.IsZero() && (oldest.IsZero() || quota.Fetched.Before(oldest)) {
+			oldest = quota.Fetched
 		}
 	}
-	title := "积分 · " + entry.Name
-	if current {
-		title += "（当前）"
+	troubledTone := ""
+	if healthy < len(quotas) {
+		troubledTone = "warning"
 	}
-	return plugui.Card(title, plugui.Fields(fields...),
-		plugui.Action{Label: "刷新每日额度", Path: "checkin", Query: accountQuery(entry), Kind: "primary"},
-		plugui.Action{Label: "一次性任务", Path: "onboarding", Query: accountQuery(entry)},
+	// An unread account adds nothing to the sums, so the sums say how many were
+	// left out; with nothing read at all they are unknown, not 0 (trap #11).
+	availableText, dailyText := "未知", "未知"
+	if unread < len(quotas) {
+		availableText, dailyText = trimAmount(available), trimAmount(daily)
+	}
+	sumLabel := ""
+	if unread > 0 && unread < len(quotas) {
+		sumLabel = fmt.Sprintf("（%d 个未读到）", unread)
+	}
+	readAt := "—"
+	if !oldest.IsZero() {
+		readAt = ageText(now.Sub(oldest))
+	}
+	return plugui.Card("账号概览", plugui.Group(
+		notice,
+		plugui.Stats(
+			plugui.Stat{Label: "账号", Value: itoaInt(len(quotas))},
+			plugui.Stat{Label: "正常", Value: itoaInt(healthy), Tone: "success"},
+			plugui.Stat{Label: "停用 / 异常", Value: itoaInt(len(quotas) - healthy), Tone: troubledTone},
+			plugui.Stat{Label: "可用积分合计" + sumLabel, Value: availableText},
+			plugui.Stat{Label: "每日赠送剩余" + sumLabel, Value: dailyText},
+			plugui.Stat{Label: "积分读取于", Value: readAt},
+		),
+	),
+		plugui.Action{Label: "刷新积分", Query: "refresh=1", Kind: "primary"},
+		plugui.Action{Label: "账号池", Path: "pool"},
+		plugui.Action{Label: "自动接码登录（新建）", Path: "login", Query: plugui.AddAccountQuery},
+	)
+}
+
+// accountTableCard renders one row per account. Every figure in a row belongs to
+// the account the row names — the stub host in accountquota_test.go answers each
+// session with its own figures to keep it that way — and a failed read says so
+// instead of showing 0 (trap #11). The two pools stay separate columns, an
+// explicit user requirement (`README.md:1471-1474`).
+func accountTableCard(quotas []accountQuota) template.HTML {
+	now := time.Now()
+	today := pool.BusinessDay()
+	rows := make([][]template.HTML, 0, len(quotas))
+	for _, quota := range quotas {
+		rows = append(rows, accountRow(quota, now, today))
+	}
+	return plugui.Card("账号", plugui.Group(
+		plugui.Table([]plugui.Column{
+			{Label: "账号"},
+			{Label: "状态"},
+			{Label: "可用", Numeric: true},
+			{Label: "永久", Numeric: true},
+			{Label: "每日赠送", Numeric: true},
+			{Label: "有效期"},
+			{Label: "操作"},
+		}, rows),
+		plugui.Note("积分分两个池：永久积分（注册与任务奖励）和每日赠送（"+dailyQuotaDescription+"），可用为两者之和。"+
+			"可自动续期：否（无 refresh_token，过期只能重新登录）。"+
+			"表中积分取自最近一次读取，账号池巡检会定期更新；点「刷新积分」逐个账号重新查询。"),
+	))
+}
+
+// accountState is how an account reads at a glance: a badge tone and label.
+// Only "success" counts the account as able to serve.
+func accountState(quota accountQuota, now time.Time) (tone, label string) {
+	switch {
+	case quota.Entry.Disabled:
+		return "warning", "已停用"
+	case quota.Entry.Unavailable:
+		return "warning", "不可用"
+	case quota.CredentialErr != nil:
+		return "danger", "凭据异常"
+	case quota.Credential.Expired(now):
+		return "danger", "已过期"
+	case quota.PointsErr != nil:
+		return "warning", "积分查询失败"
+	default:
+		return "success", "正常"
+	}
+}
+
+// accountRow renders one account's cells in the column order of
+// accountTableCard.
+func accountRow(quota accountQuota, now time.Time, today string) []template.HTML {
+	entry := quota.Entry
+	tone, label := accountState(quota, now)
+	actions := plugui.Buttons(
+		plugui.Action{Label: "签到", Path: "checkin", Query: accountQuery(entry)},
+		plugui.Action{Label: "任务", Path: "onboarding", Query: accountQuery(entry)},
 		plugui.Action{Label: "重新登录", Path: "login", Query: accountQuery(entry)},
 	)
+	dash := cellText("—")
+	if quota.CredentialErr != nil {
+		return []template.HTML{
+			plugui.Group(cellStrong(entry.Name)),
+			plugui.Group(plugui.Badge(tone, label), cellSub(truncate(quota.CredentialErr.Error(), 80))),
+			dash, dash, dash, dash, actions,
+		}
+	}
+
+	status := plugui.Group(plugui.Badge(tone, label))
+	if grantDayOf(quota.Credential) >= today {
+		status = plugui.Group(status, cellSub("今日已签到"))
+	}
+	available, balance, daily := dash, dash, dash
+	switch {
+	case quota.PointsErr != nil:
+		available = plugui.Group(plugui.Badge("danger", "查询失败"), cellSub(truncate(quota.PointsErr.Error(), 80)))
+	case quota.PointsNone:
+		available = plugui.Group(cellText("未知"), cellSub("服务端未返回 balance 字段，无法给出积分数字"))
+	default:
+		snapshot := quota.Snapshot
+		available = plugui.Group(cellStrong(trimAmount(snapshot.Available)), cellSub(ageText(now.Sub(quota.Fetched))))
+		balance = cellText(trimAmount(snapshot.Balance))
+		dailyText := trimAmount(snapshot.DailyBalance)
+		if snapshot.DailyQuota != nil {
+			dailyText += " / " + trimAmount(*snapshot.DailyQuota)
+		}
+		daily = cellText(dailyText)
+	}
+	return []template.HTML{
+		plugui.Group(cellStrong(quota.Credential.maskedPhone()), cellSub(entry.Name)),
+		status,
+		available,
+		balance,
+		daily,
+		expiryCell(quota.Credential.Expiry(), now),
+		actions,
+	}
 }
 
 // accountQuery names one account in a link. It is empty when the host gave the
@@ -175,29 +287,6 @@ func catalogueCard(cfg Config) template.HTML {
 		EmptyNotice: emptyNotice,
 		Actions:     []plugui.Action{catalogueRefreshAction()},
 	})
-}
-
-// renderAccountList renders the switcher across accounts.
-// renderAccountList renders the switcher across accounts.
-//
-// It is rendered for a single account as well, because it carries 新建账号 —
-// the only way to add a SECOND account from this page.
-func renderAccountList(accounts []pluginapi.HostAuthFileEntry, current string) template.HTML {
-	fields := make([]plugui.Field, 0, len(accounts))
-	for _, entry := range accounts {
-		marker := ""
-		if entry.AuthIndex == current {
-			marker = "（当前）"
-		}
-		fields = append(fields, plugui.Field{Label: entry.Name + marker, Value: statusText(entry)})
-	}
-	title := "全部账号"
-	if len(accounts) > 1 {
-		title += "（在地址后追加 ?auth_index=<索引> 可切换）"
-	}
-	return plugui.Card(title, plugui.Fields(fields...),
-		plugui.Action{Label: "自动接码登录（新建）", Path: "login", Query: plugui.AddAccountQuery, Kind: "primary"},
-	)
 }
 
 // loginActionSession resolves the session a login-page action applies to.
@@ -1013,4 +1102,56 @@ func emptyText(value string) string {
 		return "（空）"
 	}
 	return value
+}
+
+// cellText escapes plain text for a table cell.
+func cellText(text string) template.HTML {
+	return template.HTML(template.HTMLEscapeString(text))
+}
+
+// cellStrong renders a cell's main value in bold.
+func cellStrong(text string) template.HTML {
+	return template.HTML("<strong>" + template.HTMLEscapeString(text) + "</strong>")
+}
+
+// cellSub renders a quieter second line under a cell's main value.
+func cellSub(text string) template.HTML {
+	return template.HTML(`<span class="sub">` + template.HTMLEscapeString(text) + `</span>`)
+}
+
+// expiryCell renders a credential expiry as the time left, with the local date
+// underneath. The expiry is a local estimate: Loomy's 100002 stays the only
+// authority on whether a session is really dead.
+func expiryCell(expiry, now time.Time) template.HTML {
+	if expiry.IsZero() {
+		return plugui.Group(cellText("未知"), cellSub("以服务端 100002 为准"))
+	}
+	date := cellSub(expiry.Local().Format("01-02 15:04"))
+	remaining := expiry.Sub(now)
+	if remaining <= 0 {
+		return plugui.Group(cellText("已过期"), date)
+	}
+	return plugui.Group(cellText("剩 "+spanText(remaining)), date)
+}
+
+// spanText renders a duration in its largest whole unit: 9 天, 5 小时, 12 分钟.
+func spanText(span time.Duration) string {
+	switch {
+	case span >= 24*time.Hour:
+		return fmt.Sprintf("%d 天", int(span/(24*time.Hour)))
+	case span >= time.Hour:
+		return fmt.Sprintf("%d 小时", int(span/time.Hour))
+	case span >= time.Minute:
+		return fmt.Sprintf("%d 分钟", int(span/time.Minute))
+	default:
+		return "不到 1 分钟"
+	}
+}
+
+// ageText renders how long ago a figure was read.
+func ageText(age time.Duration) string {
+	if age < time.Minute {
+		return "刚刚读取"
+	}
+	return spanText(age) + "前"
 }

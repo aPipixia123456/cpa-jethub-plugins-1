@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/collegeming/cpa-jethub-plugins/internal/abiboot"
+	"github.com/collegeming/cpa-jethub-plugins/plugins/loomy/pool"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -212,10 +213,15 @@ func claimDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) grantO
 	snapshot.Available = snapshot.Balance + snapshot.DailyBalance
 
 	alreadyProcessed, _ := data["alreadyProcessed"].(bool)
-	// The grant is an upstream write: the next balance read must not serve the
-	// pre-claim snapshot.
-	invalidatePoints(credential)
+	// Either way today's grant is now initialised; the pool sweep reads this
+	// back as daily_cycle_date and stops claiming until the next business day.
+	grantDay := snapshot.DailyCycleDate
+	if grantDay == "" {
+		grantDay = pool.BusinessDay()
+	}
+	rememberGrantDay(credential, grantDay)
 	if alreadyProcessed {
+		// A repeat wrote nothing, so the remembered balance stays valid.
 		message := "今日额度已初始化"
 		if snapshot.DailyQuota != nil {
 			message = fmt.Sprintf("今日额度已初始化（每日 %s/%s）",
@@ -223,6 +229,9 @@ func claimDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) grantO
 		}
 		return grantOutcome{Status: "already-claimed", Message: message, Snapshot: snapshot}
 	}
+	// The grant is an upstream write: the next balance read must not serve the
+	// pre-claim snapshot.
+	invalidatePoints(credential)
 	credit := 0.0
 	if snapshot.DailyQuota != nil && snapshot.DailyConsumed != nil {
 		credit = math.Max(0, *snapshot.DailyQuota-*snapshot.DailyConsumed)
@@ -370,6 +379,9 @@ type accountQuota struct {
 	Snapshot   *pointsSnapshot
 	PointsNone bool
 	PointsErr  error
+	// Fetched is when Snapshot (or the PointsNone answer) was read; zero when
+	// the read failed.
+	Fetched time.Time
 }
 
 // collectAccountQuotas reads the points of every account, in host order, one
@@ -380,6 +392,13 @@ type accountQuota struct {
 // (parallel balance reads are what the provider's risk control reacts to). One
 // account's failure never stops the sweep and never hides another's figures.
 func collectAccountQuotas(h *abiboot.Host, accounts []pluginapi.HostAuthFileEntry, cfg Config) []accountQuota {
+	return collectQuotas(h, accounts, cfg, pointsWithinTTL)
+}
+
+// collectQuotas is collectAccountQuotas with an explicit freshness: the status
+// page reuses snapshots of any age and its 刷新积分 action reads every account
+// live, still one account at a time.
+func collectQuotas(h *abiboot.Host, accounts []pluginapi.HostAuthFileEntry, cfg Config, freshness pointsFreshness) []accountQuota {
 	out := make([]accountQuota, 0, len(accounts))
 	for _, entry := range accounts {
 		quota := accountQuota{Entry: entry}
@@ -390,14 +409,16 @@ func collectAccountQuotas(h *abiboot.Host, accounts []pluginapi.HostAuthFileEntr
 			continue
 		}
 		quota.Credential = credential
-		snapshot, errPoints := cachedFetchPoints(h, credential, cfg)
+		snapshot, fetched, errPoints := readPoints(h, credential, cfg, freshness)
 		switch {
 		case errPoints != nil:
 			quota.PointsErr = errPoints
 		case snapshot == nil:
 			quota.PointsNone = true
+			quota.Fetched = fetched
 		default:
 			quota.Snapshot = snapshot
+			quota.Fetched = fetched
 		}
 		out = append(out, quota)
 	}
@@ -446,9 +467,21 @@ func quotaJSON(quota accountQuota) map[string]any {
 	case quota.PointsNone:
 		item["points_note"] = "服务端未返回 balance 字段"
 	default:
-		item["points"] = pointsJSON(quota.Snapshot)
+		item["points"] = pointsDocument(quota)
 	}
 	return item
+}
+
+// pointsDocument is one account's published points: pointsJSON plus the daily
+// grant day this plugin last saw initialised, when that is later than what the
+// records read reported. The pool sweep reads daily_cycle_date to decide
+// whether a claim is still due today.
+func pointsDocument(quota accountQuota) map[string]any {
+	points := pointsJSON(quota.Snapshot)
+	if day := grantDayOf(quota.Credential); day > quota.Snapshot.DailyCycleDate {
+		points["daily_cycle_date"] = day
+	}
+	return points
 }
 
 // pointsJSON renders the point pools the document already published.

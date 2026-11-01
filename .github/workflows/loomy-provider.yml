@@ -1,0 +1,56 @@
+name: loomy-provider
+
+# Tests the Loomy plugin and the shared page library, then builds only the
+# linux/amd64 loomy-provider .so as a short-lived artifact for a manual deploy.
+# The release workflow (every plugin, every platform, a public release) is not
+# involved.
+on:
+  push:
+    branches:
+      - "feat/loomy-*"
+    paths:
+      - "plugins/loomy/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/loomy-provider.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+  CGO_ENABLED: "1"
+  GOTOOLCHAIN: local
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./plugins/loomy/... ./internal/jethub/plugui/...
+
+      - name: Build loomy-provider (linux/amd64, c-shared)
+        run: |
+          version="$(grep -oE '^[[:space:]]*Version[[:space:]]*=[[:space:]]*"[0-9.]+"' plugins/loomy/config.go | head -n1 | grep -oE '[0-9]+(\.[0-9]+)+')"
+          test -n "$version"
+          mkdir -p dist
+          go build -buildmode=c-shared -o "dist/loomy-provider-v${version}.so" ./plugins/loomy
+          rm -f "dist/loomy-provider-v${version}.h"
+          (cd dist && sha256sum "loomy-provider-v${version}.so" | tee "loomy-provider-v${version}.so.sha256")
+          echo "PLUGIN_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loomy-provider-${{ env.PLUGIN_VERSION }}-linux-amd64
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error

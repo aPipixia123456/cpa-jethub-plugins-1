@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/collegeming/cpa-jethub-plugins/internal/abiboot"
+	"github.com/collegeming/cpa-jethub-plugins/plugins/loomy/pool"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -208,28 +210,28 @@ func TestStatusJSONReportsAFailedReadAsUnknown(t *testing.T) {
 	}
 }
 
-// TestStatusPageRendersOneQuotaCardPerAccount is the display half of the
-// contract: two accounts, two blocks, each with its own figures.
-func TestStatusPageRendersOneQuotaCardPerAccount(t *testing.T) {
+// TestStatusPageRendersOneRowPerAccount is the display half of the contract:
+// two accounts, two table rows, each with its own figures.
+func TestStatusPageRendersOneRowPerAccount(t *testing.T) {
 	twoLoomyAccounts(t)
 	withSettings(t, DefaultConfig())
 
 	page := renderPage(t, testHost(), "/status", nil)
 
-	if got := strings.Count(page, "积分 · "); got != 2 {
-		t.Fatalf("status page shows %d quota cards, want one per account (2):\n%s", got, truncate(page, 2000))
+	if got := strings.Count(page, `<td data-label="账号">`); got != 2 {
+		t.Fatalf("status page shows %d account rows, want one per account (2):\n%s", got, truncate(page, 2000))
 	}
 	for _, want := range []string{
 		"loomy-13800138000.json",
 		"loomy-13900139000.json",
-		"15000",
-		"4992",
+		`data-label="永久">15000</td>`,
+		`data-label="每日赠送">4992</td>`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("status page is missing %q", want)
 		}
 	}
-	if !strings.Contains(page, "<dd>7</dd>") || !strings.Contains(page, "<dd>3</dd>") {
+	if !strings.Contains(page, `data-label="永久">7</td>`) || !strings.Contains(page, `data-label="每日赠送">3</td>`) {
 		t.Errorf("the second account's own pools are not rendered:\n%s", truncate(page, 2000))
 	}
 	// The per-account actions name their own account, and adding an account stays
@@ -309,5 +311,92 @@ func TestPointsCacheDropsTheEntryAfterAClaim(t *testing.T) {
 	}
 	if calls := fake.callsFor(PointsRecordsPath); len(calls) != before+1 {
 		t.Fatalf("records calls = %d, want %d (the claim invalidated the snapshot)", len(calls), before+1)
+	}
+}
+
+// TestStatusPageReusesSnapshotsOfAnyAgeUntilRefreshed pins the page's read
+// policy: once an account has been read, a view costs no upstream call however
+// old the figure is — the row says how old instead — and 刷新积分 reads every
+// account again.
+func TestStatusPageReusesSnapshotsOfAnyAgeUntilRefreshed(t *testing.T) {
+	fake := twoLoomyAccounts(t)
+	withSettings(t, DefaultConfig())
+
+	renderPage(t, testHost(), "/status", nil)
+	if calls := len(fake.callsFor(PointsRecordsPath)); calls != 2 {
+		t.Fatalf("records calls after the first view = %d, want 2 (one per account)", calls)
+	}
+
+	// Age every snapshot far past the TTL.
+	pointsCache.Range(func(key, value any) bool {
+		entry := value.(pointsCacheEntry)
+		entry.Fetched = time.Now().Add(-2 * time.Hour)
+		pointsCache.Store(key, entry)
+		return true
+	})
+	page := renderPage(t, testHost(), "/status", nil)
+	if calls := len(fake.callsFor(PointsRecordsPath)); calls != 2 {
+		t.Fatalf("records calls after the second view = %d, want still 2: the page reuses snapshots of any age", calls)
+	}
+	if !strings.Contains(page, "2 小时前") {
+		t.Errorf("the page must say how old the reused figures are:\n%s", truncate(page, 2000))
+	}
+
+	refreshed := renderPage(t, testHost(), "/status", url.Values{"refresh": {"1"}})
+	if calls := len(fake.callsFor(PointsRecordsPath)); calls != 4 {
+		t.Fatalf("records calls after 刷新积分 = %d, want 4 (every account read again)", calls)
+	}
+	if !strings.Contains(refreshed, "已逐个重新读取 2 个账号的积分") {
+		t.Errorf("the refreshed page must report the refresh:\n%s", truncate(refreshed, 2000))
+	}
+}
+
+// TestRepeatedClaimMarksTodayWithoutDroppingTheSnapshot pins what keeps the pool
+// sweep from re-posting first-login every pass: a claim the server reports as
+// already processed still stamps today's business day into the status
+// document, whose records read carries no cycle date, and — having written
+// nothing — keeps the remembered balance.
+func TestRepeatedClaimMarksTodayWithoutDroppingTheSnapshot(t *testing.T) {
+	fake := loomyQuotaHost(t, loomyAccountFixture{
+		name: "loomy-13800138000.json", authIndex: "idx-1", session: "session-alice",
+		userID: "user-alice", phone: "13800138000", pointsBody: loomyPointsBody(15000, 4992),
+	})
+	fake.mu.Lock()
+	records := fake.do
+	fake.do = func(request abiboot.HTTPDoRequest) (*pluginapi.HTTPResponse, error) {
+		if strings.Contains(request.URL, PointsFirstLoginPath) {
+			return httpResponse(http.StatusOK,
+				`{"code":"000000","data":{"permanentBalance":15000,"dailyBalance":4992,"dailyQuota":5000,"alreadyProcessed":true}}`), nil
+		}
+		return records(request)
+	}
+	fake.mu.Unlock()
+	withSettings(t, DefaultConfig())
+
+	var before map[string]any
+	if errUnmarshal := json.Unmarshal(callManagement(t, testHost(),
+		jsonManagementRequest(http.MethodGet, "/status", nil)).Body, &before); errUnmarshal != nil {
+		t.Fatalf("decode status json: %v", errUnmarshal)
+	}
+	if day, present := before["points"].(map[string]any)["daily_cycle_date"]; present {
+		t.Fatalf("daily_cycle_date = %#v before any claim; the records read carries none", day)
+	}
+
+	claim := callManagement(t, testHost(), jsonManagementRequest(http.MethodGet, "/checkin",
+		url.Values{"action": {"claim"}}))
+	if !strings.Contains(string(claim.Body), "already-claimed") {
+		t.Fatalf("claim body = %s, want already-claimed", claim.Body)
+	}
+
+	var after map[string]any
+	if errUnmarshal := json.Unmarshal(callManagement(t, testHost(),
+		jsonManagementRequest(http.MethodGet, "/status", nil)).Body, &after); errUnmarshal != nil {
+		t.Fatalf("decode status json: %v", errUnmarshal)
+	}
+	if day := after["points"].(map[string]any)["daily_cycle_date"]; day != pool.BusinessDay() {
+		t.Fatalf("daily_cycle_date = %#v after the claim, want today's business day %s", day, pool.BusinessDay())
+	}
+	if calls := len(fake.callsFor(PointsRecordsPath)); calls != 1 {
+		t.Fatalf("records calls = %d, want 1: a repeat claim wrote nothing, so the snapshot stays", calls)
 	}
 }

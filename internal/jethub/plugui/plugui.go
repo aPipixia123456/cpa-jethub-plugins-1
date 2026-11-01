@@ -155,10 +155,62 @@ a { color: var(--primary-color, #1f6feb); }
 .cat-none { margin: 10px 0 0; }
 code { background: var(--app-surface-muted, var(--bg-tertiary, #f6f8fa)); padding: 1px 5px; border-radius: 4px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+/* wide: a page built around a table gets a wider column than a form page. */
+.wrap.wide { max-width: 1120px; }
+/* stats: a row of figure tiles that wraps on narrow screens. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
+.stat {
+  background: var(--bg-primary, #ffffff);
+  border: 1px solid var(--app-border, var(--border-color, #d8dee4));
+  border-radius: var(--app-radius-sm, 6px);
+  padding: 8px 12px;
+}
+.stat .v { font-size: 18px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.stat .k { font-size: 12px; color: var(--text-secondary, #59636e); }
+.stat.success .v { color: var(--success-color, #1a7f37); }
+.stat.warning .v { color: var(--warning-color, #9a6700); }
+.stat.danger .v  { color: var(--danger-color, #cf222e); }
+/* data: one row per record. Figures are right-aligned and never wrap; on a
+   phone the header row is dropped and every row becomes a small card whose
+   cells carry their column name (data-label). */
+.table-scroll { overflow-x: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data th, table.data td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--app-border, var(--border-color, #d8dee4));
+}
+table.data th { font-size: 12px; font-weight: 600; color: var(--text-secondary, #59636e); white-space: nowrap; }
+table.data tbody tr:last-child td { border-bottom: none; }
+table.data tbody tr:hover td { background: var(--bg-hover, #eef1f4); }
+table.data .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.data .sub { display: block; font-size: 12px; color: var(--text-secondary, #59636e); }
+table.data .row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+table.data .row-actions .btn { padding: 2px 10px; font-size: 12px; white-space: nowrap; }
+@media (max-width: 640px) {
+  table.data thead { display: none; }
+  table.data, table.data tbody, table.data tr, table.data td { display: block; width: 100%; box-sizing: border-box; }
+  table.data tr {
+    border: 1px solid var(--app-border, var(--border-color, #d8dee4));
+    border-radius: var(--app-radius-sm, 6px);
+    padding: 4px 12px;
+    margin: 0 0 10px;
+  }
+  table.data tbody tr:hover td { background: none; }
+  table.data td { border: none; padding: 5px 0; display: flex; justify-content: space-between; gap: 12px; text-align: right; }
+  table.data td::before { content: attr(data-label); color: var(--text-secondary, #59636e); text-align: left; flex: 0 0 auto; }
+  table.data td .sub { text-align: right; }
+  table.data .row-actions { justify-content: flex-end; }
+}
+/* collapsible: a folded card that opens without any script. */
+details.card > summary { cursor: pointer; font-weight: 600; }
+details.card[open] > summary { margin-bottom: 10px; }
+.note { font-size: 12px; margin: 10px 0 0; }
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap{{if .Wide}} wide{{end}}">
 <div class="head"><h1>{{.Heading}}</h1></div>
 {{.Body}}
 </div>
@@ -228,6 +280,19 @@ var (
 		`<div class="notice{{if .Tone}} {{.Tone}}{{end}}">{{.Message}}</div>`))
 	badgeTmpl = template.Must(template.New("badge").Parse(
 		`<span class="badge{{if .Tone}} {{.Tone}}{{end}}">{{.Label}}</span>`))
+	statsTmpl = template.Must(template.New("stats").Parse(
+		`<div class="stats">{{range .}}<div class="stat{{if .Tone}} {{.Tone}}{{end}}">` +
+			`<div class="v">{{.Value}}</div><div class="k">{{.Label}}</div></div>{{end}}</div>`))
+	tableTmpl = template.Must(template.New("table").Parse(
+		`<div class="table-scroll"><table class="data"><thead><tr>{{range .Columns}}` +
+			`<th{{if .Numeric}} class="num"{{end}}>{{.Label}}</th>{{end}}</tr></thead><tbody>{{range .Rows}}` +
+			`<tr>{{range .}}<td{{if .Numeric}} class="num"{{end}} data-label="{{.Label}}">{{.Body}}</td>{{end}}</tr>` +
+			`{{end}}</tbody></table></div>`))
+	buttonsTmpl = template.Must(template.New("buttons").Parse(
+		`<div class="row-actions">{{range .}}<a class="btn{{if .Kind}} {{.Kind}}{{end}}" href="{{.Href}}">{{.Label}}</a>{{end}}</div>`))
+	collapsibleTmpl = template.Must(template.New("collapsible").Parse(
+		`<details class="card"><summary>{{.Title}}</summary>{{.Body}}</details>`))
+	noteTmpl = template.Must(template.New("note").Parse(`<p class="muted note">{{.}}</p>`))
 )
 
 func render(tmpl *template.Template, data any) template.HTML {
@@ -242,7 +307,7 @@ func render(tmpl *template.Template, data any) template.HTML {
 
 // Document renders a complete page. body is composed from the helpers below.
 func Document(heading string, body ...template.HTML) []byte {
-	return renderDocument(0, heading, body)
+	return renderDocument(0, false, heading, body)
 }
 
 // DocumentWithRefresh renders a page that reloads itself every seconds seconds.
@@ -253,11 +318,12 @@ func Document(heading string, body ...template.HTML) []byte {
 // a QR page uses — each load performs one server-side poll and re-renders, with
 // no form and no JavaScript involved.
 func DocumentWithRefresh(seconds int, heading string, body ...template.HTML) []byte {
-	return renderDocument(seconds, heading, body)
+	return renderDocument(seconds, false, heading, body)
 }
 
-// renderDocument is the shared shell renderer; seconds <= 0 omits the refresh.
-func renderDocument(seconds int, heading string, body []template.HTML) []byte {
+// renderDocument is the shared shell renderer; seconds <= 0 omits the refresh
+// and wide selects the wide content column.
+func renderDocument(seconds int, wide bool, heading string, body []template.HTML) []byte {
 	var buffer bytes.Buffer
 	refresh := 0
 	if seconds > 0 {
@@ -267,8 +333,9 @@ func renderDocument(seconds int, heading string, body []template.HTML) []byte {
 		Title   string
 		Heading string
 		Refresh int
+		Wide    bool
 		Body    template.HTML
-	}{Title: heading, Heading: heading, Refresh: refresh, Body: template.HTML(join(body))}
+	}{Title: heading, Heading: heading, Refresh: refresh, Wide: wide, Body: template.HTML(join(body))}
 	if errExecute := documentTmpl.Execute(&buffer, data); errExecute != nil {
 		return []byte("<!DOCTYPE html><html><body>failed to render page</body></html>")
 	}
@@ -284,6 +351,16 @@ func HTML(heading string, body ...template.HTML) pluginapi.ManagementResponse {
 	}
 }
 
+// HTMLWide renders a page with the wide content column, for a page built around
+// a table. It is otherwise the same shell as HTML.
+func HTMLWide(heading string, body ...template.HTML) pluginapi.ManagementResponse {
+	return pluginapi.ManagementResponse{
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"text/html; charset=utf-8"}},
+		Body:       renderDocument(0, true, heading, body),
+	}
+}
+
 // HTMLWithRefresh renders a self-refreshing page as a management API response.
 func HTMLWithRefresh(seconds int, heading string, body ...template.HTML) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{
@@ -295,6 +372,22 @@ func HTMLWithRefresh(seconds int, heading string, body ...template.HTML) plugina
 
 // Card renders a titled section with optional action links.
 func Card(title string, body template.HTML, actions ...Action) template.HTML {
+	return render(cardTmpl, struct {
+		Title   string
+		Body    template.HTML
+		Actions []cardAction
+	}{Title: title, Body: body, Actions: cardActions(actions)})
+}
+
+// cardAction is an Action with its href pre-computed and marked safe.
+type cardAction struct {
+	Label string
+	Href  template.URL
+	Kind  string
+}
+
+// cardActions pre-computes the hrefs of a list of actions.
+func cardActions(actions []Action) []cardAction {
 	rendered := make([]cardAction, 0, len(actions))
 	for _, action := range actions {
 		rendered = append(rendered, cardAction{
@@ -303,18 +396,7 @@ func Card(title string, body template.HTML, actions ...Action) template.HTML {
 			Kind:  action.Kind,
 		})
 	}
-	return render(cardTmpl, struct {
-		Title   string
-		Body    template.HTML
-		Actions []cardAction
-	}{Title: title, Body: body, Actions: rendered})
-}
-
-// cardAction is an Action with its href pre-computed and marked safe.
-type cardAction struct {
-	Label string
-	Href  template.URL
-	Kind  string
+	return rendered
 }
 
 // actionHref builds an action target from a relative path and a query string.
@@ -358,6 +440,74 @@ func Notice(tone, message string) template.HTML {
 // Badge renders a small status pill.
 func Badge(tone, label string) template.HTML {
 	return render(badgeTmpl, struct{ Tone, Label string }{tone, label})
+}
+
+// Stat is one figure tile of a Stats row. Tone is "", "success", "warning" or
+// "danger" and colours the figure.
+type Stat struct {
+	Label string
+	Value string
+	Tone  string
+}
+
+// Stats renders a row of figure tiles.
+func Stats(stats ...Stat) template.HTML {
+	return render(statsTmpl, stats)
+}
+
+// Column is one column of a Table. Numeric right-aligns the column and keeps
+// its figures on one line.
+type Column struct {
+	Label   string
+	Numeric bool
+}
+
+// tableCell is a cell paired with its column, so the template can label it.
+type tableCell struct {
+	Label   string
+	Numeric bool
+	Body    template.HTML
+}
+
+// Table renders one row per record under the given columns. Cells are
+// already-rendered fragments; a row shorter than the column list ends early.
+// Every cell carries its column name as data-label, which the narrow-screen
+// layout shows beside the value once the header row is hidden.
+func Table(columns []Column, rows [][]template.HTML) template.HTML {
+	rendered := make([][]tableCell, 0, len(rows))
+	for _, row := range rows {
+		cells := make([]tableCell, 0, len(row))
+		for index, body := range row {
+			if index >= len(columns) {
+				break
+			}
+			cells = append(cells, tableCell{Label: columns[index].Label, Numeric: columns[index].Numeric, Body: body})
+		}
+		rendered = append(rendered, cells)
+	}
+	return render(tableTmpl, struct {
+		Columns []Column
+		Rows    [][]tableCell
+	}{Columns: columns, Rows: rendered})
+}
+
+// Buttons renders action links as a compact group, for a table cell.
+func Buttons(actions ...Action) template.HTML {
+	return render(buttonsTmpl, cardActions(actions))
+}
+
+// Note renders a small explanatory line, for the fine print under a table.
+func Note(text string) template.HTML {
+	return render(noteTmpl, text)
+}
+
+// Collapsible renders a card whose body stays folded until the reader opens
+// it. It is a <details> element, so it needs no script.
+func Collapsible(title string, body template.HTML) template.HTML {
+	return render(collapsibleTmpl, struct {
+		Title string
+		Body  template.HTML
+	}{Title: title, Body: body})
 }
 
 // dataImagePattern is the only shape Image accepts: a base64 image data URL.

@@ -259,7 +259,7 @@ func statusJSON(h *abiboot.Host, request pluginapi.ManagementRequest) pluginapi.
 	case current.PointsNone:
 		body["points_note"] = "服务端未返回 balance 字段"
 	default:
-		body["points"] = pointsJSON(current.Snapshot)
+		body["points"] = pointsDocument(current)
 	}
 	return jsonManagementResponse(http.StatusOK, body)
 }

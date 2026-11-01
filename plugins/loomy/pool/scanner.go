@@ -371,12 +371,12 @@ func checkinDue(account statusAccount) bool {
 		return true
 	}
 	cycle := strings.TrimSpace(account.Points.DailyCycleDate)
-	return cycle == "" || cycle < businessDay()
+	return cycle == "" || cycle < BusinessDay()
 }
 
-// businessDay is Loomy's business date: the service is Chinese, so the cycle
+// BusinessDay is Loomy's business date: the service is Chinese, so the cycle
 // boundary follows UTC+8 rather than the host's local zone.
-func businessDay() string {
+func BusinessDay() string {
 	return time.Now().In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02")
 }
 
@@ -518,7 +518,7 @@ func checkinText(account statusAccount) string {
 	if cycle == "" {
 		return ""
 	}
-	if cycle < businessDay() {
+	if cycle < BusinessDay() {
 		return "可签到（cycle " + cycle + "）"
 	}
 	return "今日已签到（" + cycle + "）"

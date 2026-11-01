@@ -3,11 +3,58 @@ package plugui
 import (
 	"bytes"
 	"encoding/base64"
+	"html/template"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+// A table cell carries its column name, which is all the narrow-screen layout
+// has once the header row is hidden; figures are right-aligned; and the row
+// actions stay GET links.
+func TestTableLabelsEveryCellForTheNarrowLayout(t *testing.T) {
+	table := string(Table(
+		[]Column{{Label: "账号"}, {Label: "可用", Numeric: true}, {Label: "操作"}},
+		[][]template.HTML{{
+			template.HTML("<strong>a</strong>"),
+			template.HTML("12"),
+			Buttons(Action{Label: "签到", Path: "checkin", Query: "auth_index=idx-1"}),
+		}},
+	))
+	for _, want := range []string{
+		`<th class="num">可用</th>`,
+		`<td data-label="账号"><strong>a</strong></td>`,
+		`<td class="num" data-label="可用">12</td>`,
+		`href="checkin?auth_index=idx-1"`,
+	} {
+		if !strings.Contains(table, want) {
+			t.Errorf("table is missing %q:\n%s", want, table)
+		}
+	}
+}
+
+// The wide shell differs from the plain one only in its content column, and
+// text helpers escape what they are given.
+func TestWideShellAndTextHelpers(t *testing.T) {
+	wide := string(HTMLWide("Loomy", Note("<b>x</b>"), Stats(Stat{Label: "账号", Value: "13"})).Body)
+	if !strings.Contains(wide, `<div class="wrap wide">`) {
+		t.Errorf("HTMLWide must select the wide column:\n%s", wide)
+	}
+	if !strings.Contains(string(Document("Loomy")), `<div class="wrap">`) {
+		t.Error("Document must keep the plain column")
+	}
+	if strings.Contains(wide, "<b>x</b>") || !strings.Contains(wide, "&lt;b&gt;x&lt;/b&gt;") {
+		t.Errorf("Note must escape its text:\n%s", wide)
+	}
+	if !strings.Contains(wide, `<div class="v">13</div><div class="k">账号</div>`) {
+		t.Errorf("Stats must render the figure above its label:\n%s", wide)
+	}
+	folded := string(Collapsible("插件设置", Fields(Field{Label: "k", Value: "v"})))
+	if !strings.HasPrefix(folded, `<details class="card"><summary>插件设置</summary>`) {
+		t.Errorf("Collapsible must be a folded details card:\n%s", folded)
+	}
+}
 
 func TestDocumentRendersFragments(t *testing.T) {
 	page := Document("CodeArts",

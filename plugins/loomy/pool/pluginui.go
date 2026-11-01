@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -200,61 +202,108 @@ func renderPoolPage(h *abiboot.Host, cfg Config, outcome *scanOutcome) pluginapi
 	accounts := liveAccountRows(h, outcome)
 	if len(accounts) == 0 {
 		fragments = append(fragments, plugui.Card("账号", plugui.Notice("info", "没有 loomy 类型的凭据。")))
-		return plugui.HTML(DisplayName, fragments...)
+		return plugui.HTMLWide(DisplayName, fragments...)
 	}
-	var rows strings.Builder
-	rows.WriteString(`<table class="data"><thead><tr>` +
-		`<th>账号</th><th>积分（可用/永久/每日）</th><th>签到</th><th>状态</th><th>本次动作</th><th>操作</th>` +
-		`</tr></thead><tbody>`)
+	rows := make([][]template.HTML, 0, len(accounts))
+	parked := 0
 	for _, account := range accounts {
-		name := template.HTMLEscapeString(account.Name)
-		if account.Label != "" {
-			name += `<br><small>` + template.HTMLEscapeString(account.Label) + `</small>`
-		}
-		actionLabel := "停用"
-		actionQuery := "action=disable&name=" + template.URLQueryEscaper(account.Name)
 		if account.Disabled {
-			actionLabel = "启用"
-			actionQuery = "action=enable&name=" + template.URLQueryEscaper(account.Name)
+			parked++
 		}
-		detail := account.Action
-		if detail == "" {
-			detail = "—"
-		}
-		if account.Detail != "" {
-			detail += " · " + account.Detail
-		}
-		checkin := account.Checkin
-		if account.CheckinResult != "" {
-			if checkin != "" {
-				checkin = account.CheckinResult + "（" + checkin + "）"
-			} else {
-				checkin = account.CheckinResult
-			}
-		}
-		if checkin == "" {
-			checkin = "—"
-		}
-		rows.WriteString(fmt.Sprintf(
-			"<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><a class=\"btn\" href=\"pool?%s\">%s</a></td></tr>",
-			name, template.HTMLEscapeString(pointsText(account)), template.HTMLEscapeString(checkin),
-			template.HTMLEscapeString(account.Status), template.HTMLEscapeString(detail), actionQuery, actionLabel))
+		rows = append(rows, poolRow(account))
 	}
-	rows.WriteString(`</tbody></table>`)
-	fragments = append(fragments, plugui.Card("账号", template.HTML(rows.String())))
-	return plugui.HTML(DisplayName, fragments...)
+	parkedTone := ""
+	if parked > 0 {
+		parkedTone = "warning"
+	}
+	fragments = append(fragments, plugui.Card("账号", plugui.Group(
+		plugui.Stats(
+			plugui.Stat{Label: "账号", Value: strconv.Itoa(len(accounts))},
+			plugui.Stat{Label: "在用", Value: strconv.Itoa(len(accounts) - parked), Tone: "success"},
+			plugui.Stat{Label: "已停用", Value: strconv.Itoa(parked), Tone: parkedTone},
+		),
+		plugui.Table([]plugui.Column{
+			{Label: "账号"},
+			{Label: "可用", Numeric: true},
+			{Label: "永久", Numeric: true},
+			{Label: "每日", Numeric: true},
+			{Label: "签到"},
+			{Label: "状态"},
+			{Label: "本次动作"},
+			{Label: "操作"},
+		}, rows),
+	)))
+	return plugui.HTMLWide(DisplayName, fragments...)
 }
 
-// pointsText renders the account's points triple. A figure the provider did
-// not publish shows as 未知 rather than 0 — zero is a statement, unknown is not.
-func pointsText(account accountReport) string {
-	part := func(value *float64) string {
-		if value == nil {
-			return "未知"
-		}
-		return fmt.Sprintf("%.0f", *value)
+// poolRow renders one account's cells in the column order of renderPoolPage.
+func poolRow(account accountReport) []template.HTML {
+	name := template.HTML(`<strong>` + template.HTMLEscapeString(account.Name) + `</strong>`)
+	if account.Label != "" {
+		name += template.HTML(`<span class="sub">` + template.HTMLEscapeString(account.Label) + `</span>`)
 	}
-	return part(account.Available) + " / " + part(account.Balance) + " / " + part(account.DailyBalance)
+	checkin := account.Checkin
+	if account.CheckinResult != "" {
+		if checkin != "" {
+			checkin = account.CheckinResult + "（" + checkin + "）"
+		} else {
+			checkin = account.CheckinResult
+		}
+	}
+	if checkin == "" {
+		checkin = "—"
+	}
+	outcome := template.HTML(template.HTMLEscapeString(actionText(account.Action)))
+	if account.Detail != "" {
+		outcome += template.HTML(`<span class="sub">` + template.HTMLEscapeString(account.Detail) + `</span>`)
+	}
+	toggle := plugui.Action{Label: "停用", Path: "pool",
+		Query: url.Values{"action": {"disable"}, "name": {account.Name}}.Encode()}
+	if account.Disabled {
+		toggle = plugui.Action{Label: "启用", Path: "pool", Kind: "primary",
+			Query: url.Values{"action": {"enable"}, "name": {account.Name}}.Encode()}
+	}
+	return []template.HTML{
+		name,
+		template.HTML(template.HTMLEscapeString(amountText(account.Available))),
+		template.HTML(template.HTMLEscapeString(amountText(account.Balance))),
+		template.HTML(template.HTMLEscapeString(amountText(account.DailyBalance))),
+		template.HTML(template.HTMLEscapeString(checkin)),
+		template.HTML(template.HTMLEscapeString(account.Status)),
+		outcome,
+		plugui.Buttons(toggle),
+	}
+}
+
+// amountText renders one point figure. A figure the provider did not publish
+// shows as 未知 rather than 0 — zero is a statement, unknown is not.
+func amountText(value *float64) string {
+	if value == nil {
+		return "未知"
+	}
+	return fmt.Sprintf("%.0f", *value)
+}
+
+// actionText renders a sweep action for the table.
+func actionText(action string) string {
+	switch action {
+	case actionNone:
+		return "无变化"
+	case actionDisabled:
+		return "已停用"
+	case actionEnabled:
+		return "已恢复"
+	case actionSkipped:
+		return "跳过"
+	case actionFailed:
+		return "失败"
+	case actionWriteGuard:
+		return "写开关关闭"
+	case "":
+		return "—"
+	default:
+		return action
+	}
 }
 
 // wantsJSON reports whether the requester asked for the machine-readable form.
