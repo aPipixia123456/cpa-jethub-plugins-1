@@ -17,7 +17,7 @@ import (
 )
 
 // PluginVersion is the adapter version reported in the user agent.
-const PluginVersion = "0.1.0"
+const PluginVersion = "0.12.1"
 
 const (
 	queueStatusPath = "/api/v1/queue/status"

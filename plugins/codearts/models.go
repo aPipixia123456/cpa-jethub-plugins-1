@@ -12,8 +12,30 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
+const (
+	// deepseekV41FlashPublic is the spelling every other channel already
+	// publishes. CodeArts has to publish that same name or the deployment
+	// lists two entries for one model.
+	deepseekV41FlashPublic = "DeepSeek-V4.1-Flash"
+	// deepseekV41FlashWire is the id InferHub accepts for that model.
+	// Verified live 2026-11-02 against
+	// https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions:
+	// `deepseek-v4.1-flash-1017` streams a normal reply, and the undated
+	// `deepseek-v4.1-flash` returns InferHub.ModelArts.81003.401
+	// ("The model does not exist or you do not have access to it").
+	deepseekV41FlashWire = "deepseek-v4.1-flash-1017"
+
+	// legacyDatedDeepseekV4Flash is the one dated spelling the chat endpoint
+	// was measured to reject. The undated id is what that model is called.
+	// A later dated id (the V4.1 Flash case above, or anything else the
+	// catalogue lists) is the model's identity and must be kept.
+	legacyDatedDeepseekV4Flash   = "deepseek-v4-flash-0731"
+	legacyUndatedDeepseekV4Flash = "deepseek-v4-flash"
+)
+
 // defaultModelIDs is the fallback list used when model discovery is disabled or
-// fails. It mirrors Jet-Hub's DEFAULT_MODELS.
+// fails. It mirrors Jet-Hub's DEFAULT_MODELS, plus the dated V4.1 Flash id the
+// gateway now requires (see deepseekV41FlashWire).
 var defaultModelIDs = []string{
 	"GLM-5.2",
 	"GLM-5.1",
@@ -23,6 +45,7 @@ var defaultModelIDs = []string{
 	"openpangu-2.0-pro",
 	"deepseek-v4-flash",
 	"deepseek-v4-pro",
+	deepseekV41FlashWire,
 }
 
 // contextWindows carries the known context lengths. Models absent from the map
@@ -115,10 +138,16 @@ func staticModelInfos() []pluginapi.ModelInfo {
 // publicModelNames maps CodeArts' native ids onto the names this deployment
 // publishes.
 //
-// Two ids need it. `BenefitModel` is the benefit endpoint's own spelling, and
-// `deepseek-v4.1-flash` is the platform's lowercase form of a model every other
-// channel already publishes as `DeepSeek-V4.1-Flash`; leaving it lowercase put a
-// second, differently-named entry for one model in the list users pick from.
+// Two families need it. `BenefitModel` is the benefit endpoint's own spelling,
+// and both DeepSeek V4.1 Flash spellings the catalogue has used
+// (`deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017`) are the platform's
+// form of a model every other channel already publishes as
+// `DeepSeek-V4.1-Flash`. Leaving either lowercase, or publishing the dated id
+// as its own name, put a second entry for one model in the list users pick from.
+//
+// The reverse direction is NOT this map. Two natives share one public name, and
+// a range over the map would pick one of them at random. `upstreamModelID`
+// sends the dated wire id, which is the one InferHub accepts.
 //
 // The mapping lives here rather than in the host's `oauth-model-alias` table
 // because that table cannot reliably hand an ALREADY-TAKEN name to another
@@ -127,7 +156,8 @@ func staticModelInfos() []pluginapi.ModelInfo {
 // channels, the way `plugins/zcode/models.go` documents for `GLM-5.3-Flash`.
 var publicModelNames = map[string]string{
 	BenefitModel:          "GLM-5.3-Flash",
-	"deepseek-v4.1-flash": "DeepSeek-V4.1-Flash",
+	"deepseek-v4.1-flash": deepseekV41FlashPublic,
+	deepseekV41FlashWire:  deepseekV41FlashPublic,
 }
 
 // publicModelID returns the name this deployment publishes for a native id.
@@ -141,13 +171,36 @@ func publicModelID(id string) string {
 	return trimmed
 }
 
-// upstreamModelID maps the canonical public id back to the CodeArts native id.
+// deepseekV41FlashAlias reports whether id is any spelling of DeepSeek V4.1
+// Flash this plugin accepts from a client or from the upstream catalogue.
+func deepseekV41FlashAlias(id string) bool {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "deepseek-v4.1-flash", deepseekV41FlashWire, strings.ToLower(deepseekV41FlashPublic):
+		return true
+	default:
+		return false
+	}
+}
+
+// upstreamModelID maps a client or catalogue spelling onto the id InferHub
+// accepts.
 //
-// Without this the request would carry `DeepSeek-V4.1-Flash` to a gateway that
-// only knows `deepseek-v4.1-flash`.
+// `DeepSeek-V4.1-Flash`, the undated native id, and the dated id all go out as
+// `deepseek-v4.1-flash-1017`. The undated id is what the plugin used to send,
+// and it is what now returns 81003.401. A dated id that is not one of these
+// aliases is returned unchanged: stripping it is what made a catalogue entry
+// unreachable.
 func upstreamModelID(id string) string {
-	trimmed := strings.TrimSpace(id)
+	trimmed := normalizeModelID(id)
+	if deepseekV41FlashAlias(trimmed) {
+		return deepseekV41FlashWire
+	}
 	for native, public := range publicModelNames {
+		// V4.1 Flash has two natives for one public name. The branch above is
+		// the deterministic reverse; ranging the map would not be.
+		if strings.EqualFold(public, deepseekV41FlashPublic) {
+			continue
+		}
 		if strings.EqualFold(trimmed, public) {
 			return native
 		}
@@ -220,23 +273,34 @@ func modelInfoFor(id, displayName string) pluginapi.ModelInfo {
 	return info
 }
 
-// normalizeModelID strips the trailing 4-digit date suffix the chat endpoint
-// rejects (for example deepseek-v4-flash-0731 -> deepseek-v4-flash).
+// normalizeModelID rewrites the one dated id the chat endpoint rejects
+// (`deepseek-v4-flash-0731` -> `deepseek-v4-flash`).
+//
+// It used to strip every trailing 4-digit suffix. That hid
+// `deepseek-v4.1-flash-1017`: the catalogue lists that dated id, the strip
+// turned it into `deepseek-v4.1-flash`, and the gateway answers 81003.401 for
+// the undated form. A dated id the catalogue lists is now kept. Only the
+// legacy alias above is still rewritten.
 func normalizeModelID(id string) string {
 	trimmed := strings.TrimSpace(id)
-	if len(trimmed) < 6 {
-		return trimmed
+	if strings.EqualFold(trimmed, legacyDatedDeepseekV4Flash) {
+		return legacyUndatedDeepseekV4Flash
 	}
-	idx := strings.LastIndex(trimmed, "-")
-	if idx < 0 || len(trimmed)-idx-1 != 4 {
-		return trimmed
+	return trimmed
+}
+
+// catalogModelID is the key discovery stores for one upstream model_id.
+//
+// The legacy 0731 alias collapses onto the undated id the endpoint accepts.
+// Both V4.1 Flash spellings collapse onto the dated wire id, so a catalogue
+// that still lists the undated form and one that lists `-1017` publish a
+// single `DeepSeek-V4.1-Flash` row. Every other dated id is stored as written.
+func catalogModelID(raw string) string {
+	id := normalizeModelID(raw)
+	if deepseekV41FlashAlias(id) {
+		return deepseekV41FlashWire
 	}
-	for _, r := range trimmed[idx+1:] {
-		if r < '0' || r > '9' {
-			return trimmed
-		}
-	}
-	return trimmed[:idx]
+	return id
 }
 
 // isVisionModel reports whether a model id denotes a vision variant, which the
@@ -364,7 +428,7 @@ func fetchBuiltinModels(h *abiboot.Host, credential *Credential, out map[string]
 
 // recordModel normalises and filters one discovered model entry.
 func recordModel(out map[string]string, rawID, rawName string) {
-	id := normalizeModelID(rawID)
+	id := catalogModelID(rawID)
 	if id == "" || isVisionModel(id) {
 		return
 	}

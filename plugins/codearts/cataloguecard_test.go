@@ -41,18 +41,17 @@ func TestCatalogueCardListsTheModels(t *testing.T) {
 
 // TestCatalogueCardShowsTheUpstreamNameNotTheRenamedID is the naming guard.
 //
-// `publicModelNames` (models.go:128) renames two CodeArts-native ids so this
-// deployment publishes a canonical spelling: `glm-5.3-flash` → `GLM-5.3-Flash`
-// and `deepseek-v4.1-flash` → `DeepSeek-V4.1-Flash`. Those results are the
-// ROUTING ids, not the vendor's own names, so the card must label the row with
-// the native spelling and report the renamed one as 「请求用名」 — never the other
-// way round.
+// `publicModelNames` renames CodeArts-native ids so this deployment publishes a
+// canonical spelling: `glm-5.3-flash` → `GLM-5.3-Flash`, and both
+// `deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017` → `DeepSeek-V4.1-Flash`.
+// Those results are the ROUTING ids, not the vendor's own names, so the card
+// must label the row with the native spelling and report the renamed one as
+// 「请求用名」 — never the other way round.
 //
-// The evidence for which field holds which name is `modelInfoFor`
-// (models.go:184,189,195): `ID: publicModelID(id)` and `Name: id`, so `Name` is the
-// native id as the vendor and the discovery endpoint spell it
-// (`recordModel` normalises the raw `model_id` and keeps the raw `model_name`,
-// models.go:366-381).
+// The evidence for which field holds which name is `modelInfoFor`:
+// `ID: publicModelID(id)` and `Name: id`, so `Name` is the native id as the
+// vendor and the discovery endpoint spell it (`recordModel` folds the raw
+// `model_id` through `catalogModelID` and keeps the raw `model_name`).
 func TestCatalogueCardShowsTheUpstreamNameNotTheRenamedID(t *testing.T) {
 	entries := catalogueModelEntries([]pluginapi.ModelInfo{
 		modelInfoFor(BenefitModel, BenefitModel),
