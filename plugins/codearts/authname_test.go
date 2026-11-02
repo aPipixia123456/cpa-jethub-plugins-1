@@ -154,8 +154,8 @@ func TestAuthDataForModelPrefixToggle(t *testing.T) {
 	if errOn != nil {
 		t.Fatalf("authDataFor: %v", errOn)
 	}
-	if on.Prefix == "" {
-		t.Fatal("model_prefix=true must keep the account id as the prefix")
+	if on.Prefix != "HSTAUN89" {
+		t.Fatalf("Prefix = %q, want the first 8 characters of the access key", on.Prefix)
 	}
 
 	cfg := settings()
@@ -168,5 +168,48 @@ func TestAuthDataForModelPrefixToggle(t *testing.T) {
 	}
 	if off.Prefix != "" {
 		t.Fatalf("Prefix = %q, want empty when model_prefix is false", off.Prefix)
+	}
+}
+
+// TestModelPrefixValueIsSharedByEveryAccount pins the production config:
+// `model_prefix_value: codearts` with no `model_prefix` key. Every account
+// must publish codearts/<model>, not the first eight characters of its key.
+func TestModelPrefixValueIsSharedByEveryAccount(t *testing.T) {
+	previous := settings()
+	t.Cleanup(func() { setSettings(previous) })
+
+	cfg := ConfigFromYAML([]byte("model_prefix_value: \"  codearts  \"\n"))
+	if cfg.ModelPrefixValue != "codearts" {
+		t.Fatalf("ModelPrefixValue = %q, want the trimmed value", cfg.ModelPrefixValue)
+	}
+	if !cfg.ModelPrefix {
+		t.Fatal("omitting model_prefix must keep the default true")
+	}
+	setSettings(cfg)
+
+	first := providerTypeCredential()
+	first.AccessKeyID = "HSTA6NJSXXXXXXXX"
+	second := providerTypeCredential()
+	second.AccessKeyID = "OTHERKEY123456789"
+
+	for _, credential := range []*Credential{first, second} {
+		auth, errAuth := authDataFor(credential, "")
+		if errAuth != nil {
+			t.Fatalf("authDataFor(%s): %v", credential.AccessKeyID, errAuth)
+		}
+		if auth.Prefix != "codearts" {
+			t.Fatalf("Prefix for %s = %q, want codearts", credential.AccessKeyID, auth.Prefix)
+		}
+	}
+
+	// A set value wins even when model_prefix is explicitly false.
+	cfg.ModelPrefix = false
+	setSettings(cfg)
+	forced, errForced := authDataFor(first, "")
+	if errForced != nil {
+		t.Fatalf("authDataFor: %v", errForced)
+	}
+	if forced.Prefix != "codearts" {
+		t.Fatalf("Prefix = %q, want the configured value even when model_prefix is false", forced.Prefix)
 	}
 }

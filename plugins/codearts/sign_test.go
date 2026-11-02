@@ -156,13 +156,19 @@ func TestUnsignedHeadersAreNotSigned(t *testing.T) {
 }
 
 func TestNormalizeModelIDStripsDateSuffix(t *testing.T) {
+	// Only the legacy alias is rewritten. Every other trailing date stays:
+	// the catalogue's dated ids are what the gateway serves.
 	cases := map[string]string{
-		"deepseek-v4-flash-0731": "deepseek-v4-flash",
-		"GLM-5.2":                "GLM-5.2",
-		"glm-5.3-flash":          "glm-5.3-flash",
-		"openpangu-2.0-pro":      "openpangu-2.0-pro",
-		"model-12":               "model-12",
-		"model-12345":            "model-12345",
+		"deepseek-v4-flash-0731":   "deepseek-v4-flash",
+		"DeepSeek-V4-Flash-0731":   "deepseek-v4-flash",
+		"deepseek-v4.1-flash-1017": "deepseek-v4.1-flash-1017",
+		"deepseek-v4-pro-0815":     "deepseek-v4-pro-0815",
+		"foo-0731":                 "foo-0731",
+		"GLM-5.2":                  "GLM-5.2",
+		"glm-5.3-flash":            "glm-5.3-flash",
+		"openpangu-2.0-pro":        "openpangu-2.0-pro",
+		"model-12":                 "model-12",
+		"model-12345":              "model-12345",
 	}
 	for input, want := range cases {
 		if got := normalizeModelID(input); got != want {

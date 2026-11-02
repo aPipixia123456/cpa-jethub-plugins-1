@@ -94,10 +94,14 @@ func prepareRequestBody(payload []byte, model string, cfg Config, sessionID stri
 			return nil, nil, 0, abiboot.HTTPError("invalid_request", http.StatusBadRequest, "decode chat request: %v", errUnmarshal)
 		}
 	}
-	if strings.TrimSpace(model) != "" {
-		request.Model = upstreamModelID(model)
+	// The host's model wins over the body. Either spelling is resolved onto the
+	// id InferHub accepts: the public name and the undated V4.1 id become
+	// `deepseek-v4.1-flash-1017`, the legacy `-0731` alias becomes
+	// `deepseek-v4-flash`, and any other dated id is sent unchanged.
+	if trimmed := strings.TrimSpace(model); trimmed != "" {
+		request.Model = trimmed
 	}
-	request.Model = normalizeModelID(request.Model)
+	request.Model = upstreamModelID(request.Model)
 	if request.Model == "" {
 		return nil, nil, 0, abiboot.HTTPError("invalid_request", http.StatusBadRequest, "chat request is missing a model")
 	}

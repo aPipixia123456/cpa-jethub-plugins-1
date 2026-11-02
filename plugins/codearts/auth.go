@@ -32,13 +32,7 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 	if label == "" {
 		label = credential.AccessKeyID
 	}
-	prefix := credential.AccessKeyID
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
-	}
-	if !settings().ModelPrefix {
-		prefix = ""
-	}
+	prefix := accountModelPrefix(credential.AccessKeyID)
 	return pluginapi.AuthData{
 		Provider:    ProviderKey,
 		ID:          fileName,
@@ -63,6 +57,27 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 		},
 		NextRefreshAfter: credential.Expiry().Add(-refreshLead),
 	}, nil
+}
+
+// accountModelPrefix is the prefix the host puts in front of every model.
+//
+// Production configs set model_prefix_value: codearts and omit model_prefix.
+// A non-empty value is shared by every account, so the published name stays
+// codearts/<model> instead of the first eight characters of whichever access
+// key the account currently holds. With the value empty, model_prefix true
+// keeps that access-key prefix and model_prefix false publishes the bare name.
+func accountModelPrefix(accessKeyID string) string {
+	if value := strings.TrimSpace(settings().ModelPrefixValue); value != "" {
+		return value
+	}
+	if !settings().ModelPrefix {
+		return ""
+	}
+	prefix := accessKeyID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return prefix
 }
 
 // authNameForHost resolves the auth file name the host already uses for this
