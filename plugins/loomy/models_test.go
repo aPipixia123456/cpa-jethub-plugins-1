@@ -447,3 +447,10 @@ func TestWithPublicNamesFollowsTheLoomyEntry(t *testing.T) {
 		t.Fatalf("a listing without the Loomy entry grew to %d entries", len(without))
 	}
 }
+
+func TestModelPrefixForUsesSharedLoomyPrefix(t *testing.T) {
+	cred := &Credential{UserID: "261022103832784411"}
+	if got := modelPrefixFor(cred); got != "loomy" {
+		t.Fatalf("default prefix = %q, want loomy", got)
+	}
+}

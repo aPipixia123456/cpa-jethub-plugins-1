@@ -105,6 +105,7 @@ func TestConfigFieldsAreDeclared(t *testing.T) {
 		"phone":                "string",
 		"discover_models":      "boolean",
 		"model_prefix":         "boolean",
+		"model_prefix_name":    "string",
 		"model_cache_ttl_ms":   "integer",
 		"points_cache_ttl_ms":  "integer",
 		"model_refresh_ms":     "integer",

@@ -126,10 +126,7 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 		fileName = defaultAuthFileName(credential)
 	}
 	label := credential.displayLabel()
-	prefix := strings.TrimSpace(credential.UserID)
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
-	}
+	prefix := modelPrefixFor(credential)
 	if !settings().ModelPrefix {
 		prefix = ""
 	}
@@ -189,4 +186,23 @@ func defaultAuthFileName(credential *Credential) string {
 // token to rotate, so the only remedy is a fresh login (WeChat scan, or SMS).
 func credentialAdvice() string {
 	return "（Loomy 没有 refresh_token，只能用自动接码或手动短信重新登录）"
+}
+
+// modelPrefixFor returns the model prefix shared by every Loomy account.
+// By default all accounts publish under one fixed prefix ("loomy/<model>") so
+// clients can address the pool with a single, stable name. Setting
+// model_prefix_name to an empty string restores the old per-account prefix
+// (first 8 characters of the account userid).
+func modelPrefixFor(credential *Credential) string {
+	if name := strings.Trim(strings.TrimSpace(settings().ModelPrefixName), "/"); name != "" {
+		return name
+	}
+	prefix := ""
+	if credential != nil {
+		prefix = strings.TrimSpace(credential.UserID)
+	}
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return prefix
 }

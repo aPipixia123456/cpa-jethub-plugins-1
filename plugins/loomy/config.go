@@ -24,7 +24,7 @@ const (
 	// (`loomy-product.ts:90`).
 	DisplayName = "Loomy (讯飞)"
 	// Version is the plugin release version.
-	Version = "0.1.22"
+	Version = "0.1.23"
 	// Author identifies the plugin author organization.
 	Author = "cpa-jethub"
 	// Repository is the public source location of this plugin.
@@ -156,6 +156,8 @@ type Config struct {
 	DiscoverModels bool
 	// ModelPrefix 是否把账号 ID 作为模型前缀暴露（<账号>/<模型>）。关闭后模型列表只显示模型本身的名字。
 	ModelPrefix bool
+	// ModelPrefixName 所有账号共用的模型前缀（默认 "loomy"，即 loomy/<模型>）。设为空字符串则回到按账号 ID 前 8 位做前缀。
+	ModelPrefixName string
 	// ModelCacheTTLMS bounds the discovered catalogue lifetime.
 	ModelCacheTTLMS int
 	// ModelRefreshMS is how often the catalogue is refetched in the background,
@@ -175,10 +177,10 @@ type Config struct {
 
 	// SMSToken / SMSKeyword / SMSAPIBase / SMSWaitMS configure d1jiema auto
 	// SMS login (接码). Same platform as autoclaw / codeartsreg.
-	SMSToken    string
-	SMSKeyword  string
-	SMSAPIBase  string
-	SMSWaitMS   int
+	SMSToken   string
+	SMSKeyword string
+	SMSAPIBase string
+	SMSWaitMS  int
 }
 
 // DefaultConfig returns the settings used when the user provides nothing.
@@ -186,6 +188,7 @@ func DefaultConfig() Config {
 	return Config{
 		Enabled:           true,
 		ModelPrefix:       true,
+		ModelPrefixName:   "loomy",
 		SMSCodeTTLSeconds: SMSCodeTTLSeconds,
 		SessionTTLSeconds: SessionTTLSeconds,
 		LoginTimeoutMS:    LoginTimeoutMS,
@@ -232,6 +235,9 @@ func ConfigFromYAML(document []byte) Config {
 	cfg.RequestTimeoutMS = coerceInt(raw["request_timeout_ms"], cfg.RequestTimeoutMS)
 	cfg.DiscoverModels = coerceBool(raw["discover_models"], cfg.DiscoverModels)
 	cfg.ModelPrefix = coerceBool(raw["model_prefix"], cfg.ModelPrefix)
+	if v, ok := raw["model_prefix_name"].(string); ok {
+		cfg.ModelPrefixName = strings.TrimSpace(v)
+	}
 	cfg.ModelCacheTTLMS = coerceInt(raw["model_cache_ttl_ms"], cfg.ModelCacheTTLMS)
 	cfg.ModelRefreshMS = coerceInt(raw["model_refresh_ms"], cfg.ModelRefreshMS)
 	cfg.PointsCacheTTLMS = coerceInt(raw["points_cache_ttl_ms"], cfg.PointsCacheTTLMS)
@@ -332,6 +338,7 @@ func ConfigFields() []configField {
 				"手动短信备用路径可在登录页用数字链接输入，或用 ?phone= 覆盖"},
 		{Name: "discover_models", Type: "boolean",
 			Description: "是否用账号会话实时拉取 GET /models 目录（默认关闭）。关闭时只使用内置的 8 个兜底模型"},
+		{Name: "model_prefix_name", Type: "string", Description: "所有账号共用的模型前缀，默认 loomy（模型名为 loomy/<模型>）；留空则按账号 ID 前 8 位做前缀"},
 		{Name: "model_prefix", Type: "boolean", Description: "是否把账号 ID 作为模型前缀暴露（<账号>/<模型>）。关闭后模型列表只显示模型本身的名字"},
 		{Name: "model_cache_ttl_ms", Type: "integer", Description: "实时模型目录的缓存时长，毫秒（默认 2 小时）"},
 		{Name: "points_cache_ttl_ms", Type: "integer", Description: "单账号积分快照缓存时长，毫秒（默认 30000，0=关闭缓存每次实时查询；签到成功后自动失效）"},
