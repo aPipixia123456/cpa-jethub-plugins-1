@@ -242,7 +242,7 @@ func catalogueForPage(cfg Config) ([]modelDescriptor, string) {
 	}
 	if cached := peekDiscoveredModels(); len(cached) > 0 {
 		fetchedAt := discoveredCatalogueFetchedAt()
-		return cached, "实时目录 GET " + ModelsPath + "（缓存于 " +
+		return withPublicNames(cached), "实时目录 GET " + ModelsPath + "（缓存于 " +
 			fetchedAt.Local().Format("15:04") + "）"
 	}
 	return fallbackModels(), "内置兜底表（实时目录 GET " + ModelsPath + " 尚未拉取）"

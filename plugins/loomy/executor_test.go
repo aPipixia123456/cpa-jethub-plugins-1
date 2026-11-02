@@ -749,3 +749,38 @@ func TestExecutorRejectsBrokenCredential(t *testing.T) {
 		t.Fatalf("issued %d requests, want 0", len(fake.requests))
 	}
 }
+
+// A request for the shared DeepSeek-V4.1-Flash name reaches Loomy as its own id,
+// whether the translated payload names the model or only the request does, and
+// keeps its thinking level because the shared entry declares the same levels.
+func TestPerformInferSendsSharedNameAsLoomyID(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{name: "model in payload", payload: `{"model":"DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`},
+		{name: "model in request only", payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fake := newFakeHost()
+			var sent map[string]any
+			fake.do = func(request abiboot.HTTPDoRequest) (*pluginapi.HTTPResponse, error) {
+				if errUnmarshal := json.Unmarshal(request.Body, &sent); errUnmarshal != nil {
+					t.Errorf("decode outbound body: %v", errUnmarshal)
+				}
+				return httpResponse(200, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"), nil
+			}
+			fake.install(t)
+			if _, errExecute := handleExecutorExecute(testHost(), executorPayload(t, sampleCredential(t), "DeepSeek-V4.1-Flash", testCase.payload)); errExecute != nil {
+				t.Fatalf("executor.execute: %v", errExecute)
+			}
+			if sent["model"] != "deepseek-v4-flash-0731" {
+				t.Fatalf("outbound model = %v, want the Loomy id deepseek-v4-flash-0731", sent["model"])
+			}
+			if sent["reasoning_effort"] != "high" {
+				t.Fatalf("outbound reasoning_effort = %v, want the declared level kept", sent["reasoning_effort"])
+			}
+		})
+	}
+}

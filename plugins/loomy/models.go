@@ -209,8 +209,51 @@ var fallbackCatalogue = func() []modelDescriptor {
 	for index := range entries {
 		entries[index].Efforts = append([]string(nil), loomyEfforts...)
 	}
-	return entries
+	return withPublicNames(entries)
 }()
+
+// DeepSeek V4.1 Flash is published by every other channel as
+// `DeepSeek-V4.1-Flash`; Loomy serves it as `deepseek-v4-flash-0731`. The
+// catalogue lists the shared name right after the Loomy entry and
+// upstreamModelID sends it as the Loomy id, so a request routed by the shared
+// name reaches this channel too. The Loomy id stays published as well.
+const (
+	deepseekV41FlashPublic = "DeepSeek-V4.1-Flash"
+	deepseekV41FlashLoomy  = "deepseek-v4-flash-0731"
+)
+
+// withPublicNames adds the shared-name entry after the Loomy entry it stands
+// for. The bundled table and the live catalogue both go through it, so the name
+// is offered whichever one the deployment uses; a listing that already carries
+// the name is returned as it is.
+func withPublicNames(entries []modelDescriptor) []modelDescriptor {
+	for _, entry := range entries {
+		if entry.ID == deepseekV41FlashPublic {
+			return entries
+		}
+	}
+	out := make([]modelDescriptor, 0, len(entries)+1)
+	for _, entry := range entries {
+		out = append(out, entry)
+		if entry.ID != deepseekV41FlashLoomy {
+			continue
+		}
+		shared := entry
+		shared.ID = deepseekV41FlashPublic
+		shared.Efforts = append([]string(nil), entry.Efforts...)
+		out = append(out, shared)
+	}
+	return out
+}
+
+// upstreamModelID maps a shared name onto the id Loomy accepts; any other id is
+// sent as it is.
+func upstreamModelID(model string) string {
+	if strings.EqualFold(strings.TrimSpace(model), deepseekV41FlashPublic) {
+		return deepseekV41FlashLoomy
+	}
+	return model
+}
 
 // fallbackModels renders the bundled table.
 func fallbackModels() []modelDescriptor {
@@ -428,11 +471,11 @@ func discoverModels(h *abiboot.Host, credential *Credential, cfg Config) []model
 func catalogueForAuth(h *abiboot.Host, credential *Credential, cfg Config) []modelDescriptor {
 	ttl := time.Duration(cfg.modelCacheTTL()) * time.Millisecond
 	if cached := cachedModels(ttl); len(cached) > 0 {
-		return cached
+		return withPublicNames(cached)
 	}
 	if discovered := discoverModels(h, credential, cfg); len(discovered) > 0 {
 		putCachedModels(discovered)
-		return discovered
+		return withPublicNames(discovered)
 	}
 	// A remote failure silently falls back to the bundled table
 	// (`loomy-adapter.ts:174-191`).

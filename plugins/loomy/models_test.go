@@ -85,8 +85,9 @@ func TestLoomyDisplayName(t *testing.T) {
 	}
 }
 
-// The bundled table is 8 entries with the documented ids, display names and
-// context windows (`loomy-product.ts:74-83`).
+// The bundled table is the 8 documented entries — ids, display names and
+// context windows (`loomy-product.ts:74-83`) — plus the shared
+// `DeepSeek-V4.1-Flash` name right after the Loomy DeepSeek entry.
 func TestFallbackCatalogueMatchesSpec(t *testing.T) {
 	want := []struct {
 		id      string
@@ -94,6 +95,7 @@ func TestFallbackCatalogueMatchesSpec(t *testing.T) {
 		context int64
 	}{
 		{"deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731 · x3.0", 1_048_576},
+		{"DeepSeek-V4.1-Flash", "DeepSeek V4 Flash 0731 · x3.0", 1_048_576},
 		{"MiniMax-M3", "MiniMax M3 · x4.0", 1_048_576},
 		{"Kimi-k2.6", "Kimi k2.6 · x6.5", 262_144},
 		{"qwen-3.8-max", "Qwen 3.8 Max · x12.0", 1_000_000},
@@ -416,5 +418,32 @@ func TestDiscoverModelsFallsBackOnFailure(t *testing.T) {
 	response := decodeResult[pluginapi.ModelResponse](t, value)
 	if len(response.Models) != len(fallbackCatalogue) {
 		t.Fatalf("models = %d, want the %d bundled entries", len(response.Models), len(fallbackCatalogue))
+	}
+}
+
+// The live catalogue gets the shared DeepSeek name the same way the bundled
+// table does: right after the Loomy entry, only when that entry is listed, and
+// never twice.
+func TestWithPublicNamesFollowsTheLoomyEntry(t *testing.T) {
+	remote := []modelDescriptor{
+		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek V4 Flash 0731 · x3.0", Efforts: []string{"low", "high"}, Remote: true},
+		{ID: "GLM-5.3-Flash", Name: "GLM 5.3 Flash · x0.8", Remote: true},
+	}
+	got := withPublicNames(remote)
+	ids := make([]string, 0, len(got))
+	for _, entry := range got {
+		ids = append(ids, entry.ID)
+	}
+	if strings.Join(ids, ",") != "deepseek-v4-flash-0731,DeepSeek-V4.1-Flash,GLM-5.3-Flash" {
+		t.Fatalf("ids = %v, want the shared name right after the Loomy entry", ids)
+	}
+	if strings.Join(got[1].Efforts, ",") != "low,high" {
+		t.Fatalf("shared entry levels = %v, want the Loomy entry's levels", got[1].Efforts)
+	}
+	if again := withPublicNames(got); len(again) != len(got) {
+		t.Fatalf("a listing that already has the shared name grew to %d entries", len(again))
+	}
+	if without := withPublicNames(remote[1:]); len(without) != 1 {
+		t.Fatalf("a listing without the Loomy entry grew to %d entries", len(without))
 	}
 }

@@ -221,7 +221,8 @@ func performInfer(h *abiboot.Host, request pluginapi.ExecutorRequest, credential
 // chatRequestBody rewrites the outbound body.
 //
 // Three things are forced or defaulted: the model (when the translated payload
-// does not carry one), `stream: true`, and — only when it is legal —
+// does not carry one; a shared name such as `DeepSeek-V4.1-Flash` goes out as
+// the Loomy id), `stream: true`, and — only when it is legal —
 // `reasoning_effort`. `max_tokens`, `temperature`, `stop` and `tools` are whatever
 // the host sent; the source only includes them when the caller provided them
 // (`loomy-adapter.ts:307-326`).
@@ -241,6 +242,9 @@ func chatRequestBody(request pluginapi.ExecutorRequest, efforts []string) ([]byt
 	}
 	if _, present := body["model"]; !present && strings.TrimSpace(request.Model) != "" {
 		body["model"] = request.Model
+	}
+	if model, ok := body["model"].(string); ok {
+		body["model"] = upstreamModelID(model)
 	}
 	if requested, ok := body["reasoning_effort"].(string); ok {
 		if !containsEffort(efforts, requested) {
