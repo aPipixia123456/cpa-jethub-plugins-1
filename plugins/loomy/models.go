@@ -189,10 +189,12 @@ var loomyEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 // under-report than advertise a modality the server may reject" — and
 // `supportsThinking: true` (`loomy-adapter.ts:101-112`).
 //
-// ⚠️ `spark-x`: the remote declares 1048576 while the Loomy client forces 262144
+// ⚠️ `spark-x2.6`: the remote declares 1048576 while the Loomy client forces 262144
 // through a local override. This port follows the remote value and keeps
 // 1_048_576; switch it to 262144 if long-context requests are rejected in
-// practice (`loomy-product.ts:69-72`, `README.md:1455-1457`).
+// practice (`loomy-product.ts:69-72`, `README.md:1455-1457`). The live catalogue
+// used to publish this model as `spark-x`; upstreamModelID still accepts that
+// legacy id.
 var fallbackCatalogue = func() []modelDescriptor {
 	entries := []modelDescriptor{
 		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek V4 Flash 0731 · x3.0", ContextLength: 1_048_576, SupportsThinking: true},
@@ -201,7 +203,7 @@ var fallbackCatalogue = func() []modelDescriptor {
 		{ID: "qwen-3.8-max", Name: "Qwen 3.8 Max (x12.0)", ContextLength: 1_000_000, SupportsThinking: true},
 		{ID: "GLM-5.3-Flash", Name: "GLM 5.3 Flash(x0.8)", ContextLength: 1_048_576, SupportsThinking: true},
 		{ID: "qwen3.8-flash", Name: "qwen 3.8 flash · x0.8", ContextLength: 1_000_000, SupportsThinking: true},
-		{ID: "spark-x", Name: "Spark X2.5 · x0.1", ContextLength: 1_048_576, SupportsThinking: true},
+		{ID: "spark-x2.6", Name: "Spark X2.6 · x0.1", ContextLength: 1_048_576, SupportsThinking: true},
 		{ID: "mimo-v2.5", Name: "MiMo V2.5 · x3.3", ContextLength: 1_048_576, SupportsThinking: true},
 	}
 	// The reference keeps the fallback levels identical to the remote ones
@@ -220,6 +222,13 @@ var fallbackCatalogue = func() []modelDescriptor {
 const (
 	deepseekV41FlashPublic = "DeepSeek-V4.1-Flash"
 	deepseekV41FlashLoomy  = "deepseek-v4-flash-0731"
+	// legacySparkX is the id the live catalogue published before it was renamed
+	// spark-x2.6. Old clients still send it.
+	legacySparkX = "spark-x"
+	sparkX26     = "spark-x2.6"
+	// accountIDPrefixLen is the userid slice CPA publishes ahead of a model when
+	// model_prefix_name is empty (modelPrefixFor): `<8 chars>/<model>`.
+	accountIDPrefixLen = 8
 )
 
 // withPublicNames adds the shared-name entry after the Loomy entry it stands
@@ -246,13 +255,76 @@ func withPublicNames(entries []modelDescriptor) []modelDescriptor {
 	return out
 }
 
-// upstreamModelID maps a shared name onto the id Loomy accepts; any other id is
-// sent as it is.
+// upstreamModelID maps a shared or legacy name onto the id Loomy accepts.
+//
+// The comparison is case-insensitive. Any other id is returned with surrounding
+// space removed and its own spelling kept: `GLM-5.3-Flash` stays that way,
+// because that is the id the upstream lists. Callers strip a CPA prefix first
+// (stripLeadingModelPrefix); this function does not look for one.
 func upstreamModelID(model string) string {
-	if strings.EqualFold(strings.TrimSpace(model), deepseekV41FlashPublic) {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case strings.ToLower(deepseekV41FlashPublic):
 		return deepseekV41FlashLoomy
+	case legacySparkX:
+		return sparkX26
+	default:
+		return strings.TrimSpace(model)
 	}
-	return model
+}
+
+// stripLeadingModelPrefix removes one CPA prefix from a requested model id.
+//
+// Two prefixes are published. `model_prefix_name` (default `loomy`) yields
+// `loomy/<model>`. An empty name yields the first 8 characters of the account
+// userid, `<8 chars>/<model>`. The host strips that prefix before it sets
+// request.Model, but the translated payload often still carries it, and Loomy
+// answers an unknown id as spark-x2.6. A catalogue id has no slash, so only one
+// leading segment is examined, and it is removed only when it is one of those
+// prefixes.
+func stripLeadingModelPrefix(model string) string {
+	trimmed := strings.TrimSpace(model)
+	head, tail, found := strings.Cut(trimmed, "/")
+	if !found || head == "" {
+		return trimmed
+	}
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return trimmed
+	}
+	prefix := strings.Trim(strings.TrimSpace(settings().ModelPrefixName), "/")
+	if prefix != "" && strings.EqualFold(head, prefix) {
+		return tail
+	}
+	if len(head) == accountIDPrefixLen && accountPrefixSegment(head) {
+		return tail
+	}
+	return trimmed
+}
+
+// accountPrefixSegment reports whether head can be the 8-character account
+// prefix modelPrefixFor emits. Userids are numeric; the segment is matched as
+// ASCII letters and digits so a hand-written prefix such as `abcd1234` is
+// recognised too.
+func accountPrefixSegment(head string) bool {
+	if len(head) != accountIDPrefixLen {
+		return false
+	}
+	for index := 0; index < len(head); index++ {
+		char := head[index]
+		digit := char >= '0' && char <= '9'
+		lower := char >= 'a' && char <= 'z'
+		upper := char >= 'A' && char <= 'Z'
+		if !digit && !lower && !upper {
+			return false
+		}
+	}
+	return true
+}
+
+// bareUpstreamModel is the id a chat completion must send: the CPA prefix
+// removed, then the shared-name and legacy-id map applied.
+func bareUpstreamModel(model string) string {
+	return upstreamModelID(stripLeadingModelPrefix(model))
 }
 
 // fallbackModels renders the bundled table.

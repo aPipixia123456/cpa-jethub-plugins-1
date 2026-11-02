@@ -203,7 +203,9 @@ func performInfer(h *abiboot.Host, request pluginapi.ExecutorRequest, credential
 	// The levels the model declares are resolved here, from the same catalogue the
 	// host rendered its selector from, so an out-of-list value can be dropped
 	// (`loomy-adapter.ts:430-455`).
-	efforts, _ := declaredEffortsFor(h, credential, cfg, request.Model)
+	// Resolve the same id the body will send, so a prefixed or legacy name still
+	// finds the levels the catalogue declares for the upstream model.
+	efforts, _ := declaredEffortsFor(h, credential, cfg, bareUpstreamModel(request.Model))
 	body, errBody := chatRequestBody(request, efforts)
 	if errBody != nil {
 		return nil, errBody
@@ -220,12 +222,18 @@ func performInfer(h *abiboot.Host, request pluginapi.ExecutorRequest, credential
 
 // chatRequestBody rewrites the outbound body.
 //
-// Three things are forced or defaulted: the model (when the translated payload
-// does not carry one; a shared name such as `DeepSeek-V4.1-Flash` goes out as
-// the Loomy id), `stream: true`, and — only when it is legal —
-// `reasoning_effort`. `max_tokens`, `temperature`, `stop` and `tools` are whatever
-// the host sent; the source only includes them when the caller provided them
-// (`loomy-adapter.ts:307-326`).
+// Three things are forced or defaulted: the model, `stream: true`, and — only
+// when it is legal — `reasoning_effort`. `max_tokens`, `temperature`, `stop` and
+// `tools` are whatever the host sent; the source only includes them when the
+// caller provided them (`loomy-adapter.ts:307-326`).
+//
+// The model written is always the bare upstream id. The host strips a CPA
+// prefix (`loomy/` or `<account>/`) from request.Model before dispatch, but the
+// translated payload often still carries it in `model`, and Loomy silently
+// answers an unknown id as spark-x2.6. request.Model therefore wins whenever it
+// is set; either source then loses one leading prefix segment and is mapped
+// through upstreamModelID (`DeepSeek-V4.1-Flash` becomes
+// `deepseek-v4-flash-0731`).
 //
 // `efforts` is the level list the model declares. The requested level is written
 // ONLY when it appears there: the reference checks `effortsForModel.includes(...)`
@@ -240,11 +248,14 @@ func chatRequestBody(request pluginapi.ExecutorRequest, efforts []string) ([]byt
 	if errUnmarshal := json.Unmarshal(request.Payload, &body); errUnmarshal != nil {
 		return nil, abiboot.HTTPError("invalid_request", http.StatusBadRequest, "解码 chat-completions 请求失败：%v", errUnmarshal)
 	}
-	if _, present := body["model"]; !present && strings.TrimSpace(request.Model) != "" {
-		body["model"] = request.Model
+	chosen := strings.TrimSpace(request.Model)
+	if chosen == "" {
+		if model, ok := body["model"].(string); ok {
+			chosen = model
+		}
 	}
-	if model, ok := body["model"].(string); ok {
-		body["model"] = upstreamModelID(model)
+	if resolved := bareUpstreamModel(chosen); resolved != "" {
+		body["model"] = resolved
 	}
 	if requested, ok := body["reasoning_effort"].(string); ok {
 		if !containsEffort(efforts, requested) {

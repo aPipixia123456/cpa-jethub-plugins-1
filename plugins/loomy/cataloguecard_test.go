@@ -69,7 +69,7 @@ func TestCatalogueCardShowsTheVendorNameNotTheStrippedOne(t *testing.T) {
 		{ID: "MiniMax-M3", Name: "MiniMax M3 （x4.0）", ContextLength: 1_048_576},
 		{ID: "qwen-3.8-max", Name: "Qwen 3.8 Max (x12.0)", ContextLength: 1_000_000},
 		{ID: "GLM-5.3-Flash", Name: "GLM 5.3 Flash(x0.8)", ContextLength: 1_048_576},
-		{ID: "spark-x", Name: "Spark X2.5", ContextLength: 1_048_576},
+		{ID: "spark-x2.6", Name: "Spark X2.6", ContextLength: 1_048_576},
 	}
 	rows := catalogueModelEntries(entries)
 	if len(rows) != 4 {
@@ -86,7 +86,7 @@ func TestCatalogueCardShowsTheVendorNameNotTheStrippedOne(t *testing.T) {
 		{native: "GLM 5.3 Flash(x0.8)", id: "GLM-5.3-Flash"},
 		// A name with no multiplier stays as upstream sent it, and the routed id
 		// is still reported because it differs.
-		{native: "Spark X2.5", id: "spark-x"},
+		{native: "Spark X2.6", id: "spark-x2.6"},
 	}
 	for index, expected := range want {
 		if rows[index].Native != expected.native {

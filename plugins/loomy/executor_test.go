@@ -750,6 +750,62 @@ func TestExecutorRejectsBrokenCredential(t *testing.T) {
 	}
 }
 
+// The outbound model is the bare upstream id. A CPA prefix on the payload
+// (`loomy/<id>` or `<8-char account>/<id>`) must not be forwarded: Loomy
+// silently answers an unknown id as spark-x2.6. The host-stripped request.Model
+// wins when it is set, and upstreamModelID runs after the prefix is removed.
+func TestChatRequestBodySendsBareUpstreamModel(t *testing.T) {
+	withSettings(t, DefaultConfig())
+	cases := []struct {
+		name         string
+		requestModel string
+		payloadModel string
+		want         string
+	}{
+		{name: "loomy prefix on the loomy id", payloadModel: "loomy/deepseek-v4-flash-0731", want: "deepseek-v4-flash-0731"},
+		{name: "loomy prefix on the shared DeepSeek name", payloadModel: "loomy/DeepSeek-V4.1-Flash", want: "deepseek-v4-flash-0731"},
+		{name: "loomy prefix is case-insensitive before the shared-name map", payloadModel: "LOOMY/deepseek-v4.1-flash", want: "deepseek-v4-flash-0731"},
+		{name: "loomy prefix on qwen", payloadModel: "loomy/qwen3.8-flash", want: "qwen3.8-flash"},
+		{name: "account-id prefix", payloadModel: "abcd1234/GLM-5.3-Flash", want: "GLM-5.3-Flash"},
+		{name: "legacy spark-x", payloadModel: "spark-x", want: "spark-x2.6"},
+		{name: "legacy spark-x is case-insensitive", payloadModel: "Spark-X", want: "spark-x2.6"},
+		{
+			name:         "host-stripped request.Model wins over a prefixed payload",
+			requestModel: "DeepSeek-V4.1-Flash",
+			payloadModel: "loomy/qwen3.8-flash",
+			want:         "deepseek-v4-flash-0731",
+		},
+		{
+			name:         "a prefixed request.Model is stripped too",
+			requestModel: "loomy/GLM-5.3-Flash",
+			payloadModel: "loomy/qwen3.8-flash",
+			want:         "GLM-5.3-Flash",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			payload := `{"messages":[{"role":"user","content":"hi"}]}`
+			if testCase.payloadModel != "" {
+				payload = `{"model":"` + testCase.payloadModel + `","messages":[{"role":"user","content":"hi"}]}`
+			}
+			body, errBody := chatRequestBody(pluginapi.ExecutorRequest{
+				Model:   testCase.requestModel,
+				Payload: []byte(payload),
+			}, nil)
+			if errBody != nil {
+				t.Fatalf("chatRequestBody: %v", errBody)
+			}
+			var decoded map[string]any
+			if errUnmarshal := json.Unmarshal(body, &decoded); errUnmarshal != nil {
+				t.Fatalf("decode body: %v", errUnmarshal)
+			}
+			if decoded["model"] != testCase.want {
+				t.Fatalf("model = %v, want %s", decoded["model"], testCase.want)
+			}
+		})
+	}
+}
+
 // A request for the shared DeepSeek-V4.1-Flash name reaches Loomy as its own id,
 // whether the translated payload names the model or only the request does, and
 // keeps its thinking level because the shared entry declares the same levels.
@@ -760,6 +816,7 @@ func TestPerformInferSendsSharedNameAsLoomyID(t *testing.T) {
 	}{
 		{name: "model in payload", payload: `{"model":"DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`},
 		{name: "model in request only", payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`},
+		{name: "prefixed payload loses to the host-stripped model", payload: `{"model":"loomy/qwen3.8-flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -780,6 +837,43 @@ func TestPerformInferSendsSharedNameAsLoomyID(t *testing.T) {
 			}
 			if sent["reasoning_effort"] != "high" {
 				t.Fatalf("outbound reasoning_effort = %v, want the declared level kept", sent["reasoning_effort"])
+			}
+		})
+	}
+}
+
+// A prefixed or legacy request.Model still resolves the catalogue, so a declared
+// thinking level is sent and the wire model is the bare upstream id.
+func TestPerformInferStripsPrefixBeforeUpstream(t *testing.T) {
+	withSettings(t, DefaultConfig())
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{model: "loomy/DeepSeek-V4.1-Flash", want: "deepseek-v4-flash-0731"},
+		{model: "abcd1234/GLM-5.3-Flash", want: "GLM-5.3-Flash"},
+		{model: "spark-x", want: "spark-x2.6"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.model, func(t *testing.T) {
+			fake := newFakeHost()
+			var sent map[string]any
+			fake.do = func(request abiboot.HTTPDoRequest) (*pluginapi.HTTPResponse, error) {
+				if errUnmarshal := json.Unmarshal(request.Body, &sent); errUnmarshal != nil {
+					t.Errorf("decode outbound body: %v", errUnmarshal)
+				}
+				return httpResponse(200, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"), nil
+			}
+			fake.install(t)
+			payload := `{"model":"` + testCase.model + `","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`
+			if _, errExecute := handleExecutorExecute(testHost(), executorPayload(t, sampleCredential(t), testCase.model, payload)); errExecute != nil {
+				t.Fatalf("executor.execute: %v", errExecute)
+			}
+			if sent["model"] != testCase.want {
+				t.Fatalf("outbound model = %v, want %s", sent["model"], testCase.want)
+			}
+			if sent["reasoning_effort"] != "high" {
+				t.Fatalf("outbound reasoning_effort = %v, want high (catalogue lookup must use the bare id)", sent["reasoning_effort"])
 			}
 		})
 	}

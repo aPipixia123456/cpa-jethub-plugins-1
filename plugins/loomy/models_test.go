@@ -101,7 +101,7 @@ func TestFallbackCatalogueMatchesSpec(t *testing.T) {
 		{"qwen-3.8-max", "Qwen 3.8 Max · x12.0", 1_000_000},
 		{"GLM-5.3-Flash", "GLM 5.3 Flash · x0.8", 1_048_576},
 		{"qwen3.8-flash", "qwen 3.8 flash · x0.8", 1_000_000},
-		{"spark-x", "Spark X2.5 · x0.1", 1_048_576},
+		{"spark-x2.6", "Spark X2.6 · x0.1", 1_048_576},
 		{"mimo-v2.5", "MiMo V2.5 · x3.3", 1_048_576},
 	}
 	if len(fallbackCatalogue) != len(want) {
@@ -127,19 +127,78 @@ func TestFallbackCatalogueMatchesSpec(t *testing.T) {
 	}
 }
 
-// `spark-x` is the documented open discrepancy: the port keeps the remote
-// 1_048_576 and notes the client-side 262144 override.
-func TestSparkXKeepsRemoteContextWindow(t *testing.T) {
+// `spark-x2.6` is the documented open discrepancy: the port keeps the remote
+// 1_048_576 and notes the client-side 262144 override. The live catalogue used
+// to call this model `spark-x`.
+func TestSparkX26KeepsRemoteContextWindow(t *testing.T) {
 	for _, entry := range fallbackCatalogue {
-		if entry.ID != "spark-x" {
+		if entry.ID != "spark-x2.6" {
 			continue
 		}
 		if entry.ContextLength != 1_048_576 {
-			t.Fatalf("spark-x context = %d, want the remote 1048576", entry.ContextLength)
+			t.Fatalf("spark-x2.6 context = %d, want the remote 1048576", entry.ContextLength)
 		}
 		return
 	}
-	t.Fatal("spark-x is missing from the fallback catalogue")
+	t.Fatal("spark-x2.6 is missing from the fallback catalogue")
+}
+
+// upstreamModelID is case-insensitive and rewrites the two names Loomy will not
+// accept as sent: the shared DeepSeek name, and the retired spark-x id.
+func TestUpstreamModelIDMapsSharedAndLegacyNames(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"DeepSeek-V4.1-Flash", "deepseek-v4-flash-0731"},
+		{"deepseek-v4.1-flash", "deepseek-v4-flash-0731"},
+		{"DEEPSEEK-V4.1-FLASH", "deepseek-v4-flash-0731"},
+		{"spark-x", "spark-x2.6"},
+		{"SPARK-X", "spark-x2.6"},
+		{"Spark-X", "spark-x2.6"},
+		{"spark-x2.6", "spark-x2.6"},
+		{"GLM-5.3-Flash", "GLM-5.3-Flash"},
+		{"qwen3.8-flash", "qwen3.8-flash"},
+		{"  MiniMax-M3  ", "MiniMax-M3"},
+	}
+	for _, testCase := range cases {
+		if got := upstreamModelID(testCase.input); got != testCase.want {
+			t.Errorf("upstreamModelID(%q) = %q, want %q", testCase.input, got, testCase.want)
+		}
+	}
+}
+
+// A CPA prefix is one leading segment: the configured model_prefix_name, or an
+// 8-character account id. The model id after the slash is left untouched for
+// upstreamModelID to map.
+func TestStripLeadingModelPrefix(t *testing.T) {
+	withSettings(t, DefaultConfig())
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"loomy/deepseek-v4-flash-0731", "deepseek-v4-flash-0731"},
+		{"Loomy/DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash"},
+		{"loomy/qwen3.8-flash", "qwen3.8-flash"},
+		{"abcd1234/GLM-5.3-Flash", "GLM-5.3-Flash"},
+		{"spark-x", "spark-x"},
+		{"MiniMax-M3", "MiniMax-M3"},
+	}
+	for _, testCase := range cases {
+		if got := stripLeadingModelPrefix(testCase.input); got != testCase.want {
+			t.Errorf("stripLeadingModelPrefix(%q) = %q, want %q", testCase.input, got, testCase.want)
+		}
+	}
+
+	custom := DefaultConfig()
+	custom.ModelPrefixName = "xfyun"
+	withSettings(t, custom)
+	if got := stripLeadingModelPrefix("xfyun/qwen3.8-flash"); got != "qwen3.8-flash" {
+		t.Fatalf("configured prefix: stripLeadingModelPrefix = %q, want qwen3.8-flash", got)
+	}
+	if got := stripLeadingModelPrefix("abcd1234/GLM-5.3-Flash"); got != "GLM-5.3-Flash" {
+		t.Fatalf("account prefix under a custom name: got %q, want GLM-5.3-Flash", got)
+	}
 }
 
 // The remote parser accepts a bare array and an object with `data`
