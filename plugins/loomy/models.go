@@ -197,7 +197,7 @@ var loomyEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 // legacy id.
 var fallbackCatalogue = func() []modelDescriptor {
 	entries := []modelDescriptor{
-		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek V4 Flash 0731 · x3.0", ContextLength: 1_048_576, SupportsThinking: true},
+		{ID: "DeepSeek-V4.1-Flash", Name: "DeepSeek V4.1 Flash · x2.0", ContextLength: 1_048_576, SupportsThinking: true},
 		{ID: "MiniMax-M3", Name: "MiniMax M3 （x4.0）", ContextLength: 1_048_576, SupportsThinking: true},
 		{ID: "Kimi-k2.6", Name: "Kimi k2.6 · x6.5", ContextLength: 262_144, SupportsThinking: true},
 		{ID: "qwen-3.8-max", Name: "Qwen 3.8 Max (x12.0)", ContextLength: 1_000_000, SupportsThinking: true},
@@ -211,17 +211,17 @@ var fallbackCatalogue = func() []modelDescriptor {
 	for index := range entries {
 		entries[index].Efforts = append([]string(nil), loomyEfforts...)
 	}
-	return withPublicNames(entries)
+	return entries
 }()
 
-// DeepSeek V4.1 Flash is published by every other channel as
-// `DeepSeek-V4.1-Flash`; Loomy serves it as `deepseek-v4-flash-0731`. The
-// catalogue lists the shared name right after the Loomy entry and
-// upstreamModelID sends it as the Loomy id, so a request routed by the shared
-// name reaches this channel too. The Loomy id stays published as well.
+// DeepSeek V4.1 Flash is the upstream id `DeepSeek-V4.1-Flash`. Older Loomy
+// catalogues also listed `deepseek-v4-flash-0731` (and some accounts still do);
+// that legacy id is remapped here so a request for it reaches the current
+// model instead of falling through to spark-x2.6 on accounts that delisted it.
 const (
-	deepseekV41FlashPublic = "DeepSeek-V4.1-Flash"
-	deepseekV41FlashLoomy  = "deepseek-v4-flash-0731"
+	deepseekV41Flash = "DeepSeek-V4.1-Flash"
+	// legacyDeepSeekV4Flash0731 is the retired Loomy id for V4.1 Flash.
+	legacyDeepSeekV4Flash0731 = "deepseek-v4-flash-0731"
 	// legacySparkX is the id the live catalogue published before it was renamed
 	// spark-x2.6. Old clients still send it.
 	legacySparkX = "spark-x"
@@ -231,40 +231,17 @@ const (
 	accountIDPrefixLen = 8
 )
 
-// withPublicNames adds the shared-name entry after the Loomy entry it stands
-// for. The bundled table and the live catalogue both go through it, so the name
-// is offered whichever one the deployment uses; a listing that already carries
-// the name is returned as it is.
-func withPublicNames(entries []modelDescriptor) []modelDescriptor {
-	for _, entry := range entries {
-		if entry.ID == deepseekV41FlashPublic {
-			return entries
-		}
-	}
-	out := make([]modelDescriptor, 0, len(entries)+1)
-	for _, entry := range entries {
-		out = append(out, entry)
-		if entry.ID != deepseekV41FlashLoomy {
-			continue
-		}
-		shared := entry
-		shared.ID = deepseekV41FlashPublic
-		shared.Efforts = append([]string(nil), entry.Efforts...)
-		out = append(out, shared)
-	}
-	return out
-}
-
 // upstreamModelID maps a shared or legacy name onto the id Loomy accepts.
 //
-// The comparison is case-insensitive. Any other id is returned with surrounding
-// space removed and its own spelling kept: `GLM-5.3-Flash` stays that way,
-// because that is the id the upstream lists. Callers strip a CPA prefix first
-// (stripLeadingModelPrefix); this function does not look for one.
+// The comparison is case-insensitive. DeepSeek-V4.1-Flash (any casing) and the
+// retired deepseek-v4-flash-0731 both become the canonical DeepSeek-V4.1-Flash
+// spelling. spark-x becomes spark-x2.6. Any other id is returned with
+// surrounding space removed and its own spelling kept. Callers strip a CPA
+// prefix first (stripLeadingModelPrefix); this function does not look for one.
 func upstreamModelID(model string) string {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case strings.ToLower(deepseekV41FlashPublic):
-		return deepseekV41FlashLoomy
+	case strings.ToLower(deepseekV41Flash), legacyDeepSeekV4Flash0731:
+		return deepseekV41Flash
 	case legacySparkX:
 		return sparkX26
 	default:
@@ -543,11 +520,11 @@ func discoverModels(h *abiboot.Host, credential *Credential, cfg Config) []model
 func catalogueForAuth(h *abiboot.Host, credential *Credential, cfg Config) []modelDescriptor {
 	ttl := time.Duration(cfg.modelCacheTTL()) * time.Millisecond
 	if cached := cachedModels(ttl); len(cached) > 0 {
-		return withPublicNames(cached)
+		return cached
 	}
 	if discovered := discoverModels(h, credential, cfg); len(discovered) > 0 {
 		putCachedModels(discovered)
-		return withPublicNames(discovered)
+		return discovered
 	}
 	// A remote failure silently falls back to the bundled table
 	// (`loomy-adapter.ts:174-191`).

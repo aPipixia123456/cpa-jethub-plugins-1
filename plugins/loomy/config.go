@@ -24,7 +24,7 @@ const (
 	// (`loomy-product.ts:90`).
 	DisplayName = "Loomy (讯飞)"
 	// Version is the plugin release version.
-	Version = "0.1.24"
+	Version = "0.1.25"
 	// Author identifies the plugin author organization.
 	Author = "cpa-jethub"
 	// Repository is the public source location of this plugin.

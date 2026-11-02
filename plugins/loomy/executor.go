@@ -232,8 +232,8 @@ func performInfer(h *abiboot.Host, request pluginapi.ExecutorRequest, credential
 // translated payload often still carries it in `model`, and Loomy silently
 // answers an unknown id as spark-x2.6. request.Model therefore wins whenever it
 // is set; either source then loses one leading prefix segment and is mapped
-// through upstreamModelID (`DeepSeek-V4.1-Flash` becomes
-// `deepseek-v4-flash-0731`).
+// through upstreamModelID (`deepseek-v4-flash-0731` becomes
+// `DeepSeek-V4.1-Flash`; casing of the current id is normalised).
 //
 // `efforts` is the level list the model declares. The requested level is written
 // ONLY when it appears there: the reference checks `effortsForModel.includes(...)`

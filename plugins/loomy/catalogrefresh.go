@@ -242,7 +242,7 @@ func catalogueForPage(cfg Config) ([]modelDescriptor, string) {
 	}
 	if cached := peekDiscoveredModels(); len(cached) > 0 {
 		fetchedAt := discoveredCatalogueFetchedAt()
-		return withPublicNames(cached), "实时目录 GET " + ModelsPath + "（缓存于 " +
+		return cached, "实时目录 GET " + ModelsPath + "（缓存于 " +
 			fetchedAt.Local().Format("15:04") + "）"
 	}
 	return fallbackModels(), "内置兜底表（实时目录 GET " + ModelsPath + " 尚未拉取）"
@@ -274,7 +274,7 @@ func discoveredCatalogueFetchedAt() time.Time {
 // asked about: `info()` fills it with `bareName()` (models.go:153), which is
 // `splitLoomyRate(m.Name)` — a LOCAL normalisation that strips that multiplier.
 // Using it would display a name upstream never published. `ModelInfo.ID` is the
-// wire `id`, a slug (`MiniMax-M3`, `deepseek-v4-flash-0731`) that requests are
+// wire `id`, a slug (`MiniMax-M3`, `DeepSeek-V4.1-Flash`) that requests are
 // routed by, so it belongs in the row as the routed name, not as the label.
 func catalogueModelEntries(entries []modelDescriptor) []plugui.ModelEntry {
 	now := time.Now()

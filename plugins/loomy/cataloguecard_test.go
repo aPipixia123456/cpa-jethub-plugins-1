@@ -42,7 +42,7 @@ func TestCatalogueCardListsTheModels(t *testing.T) {
 	if !strings.Contains(card, "模型目录") {
 		t.Fatalf("no 模型目录 card was rendered:\n%s", card)
 	}
-	for _, name := range []string{"MiniMax M3", "Qwen 3.8 Max", "DeepSeek V4 Flash 0731"} {
+	for _, name := range []string{"MiniMax M3", "Qwen 3.8 Max", "DeepSeek V4.1 Flash"} {
 		if !strings.Contains(card, name) {
 			t.Errorf("the catalogue card does not list %q:\n%s", name, card)
 		}

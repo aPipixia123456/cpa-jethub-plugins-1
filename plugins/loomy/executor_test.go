@@ -762,9 +762,9 @@ func TestChatRequestBodySendsBareUpstreamModel(t *testing.T) {
 		payloadModel string
 		want         string
 	}{
-		{name: "loomy prefix on the loomy id", payloadModel: "loomy/deepseek-v4-flash-0731", want: "deepseek-v4-flash-0731"},
-		{name: "loomy prefix on the shared DeepSeek name", payloadModel: "loomy/DeepSeek-V4.1-Flash", want: "deepseek-v4-flash-0731"},
-		{name: "loomy prefix is case-insensitive before the shared-name map", payloadModel: "LOOMY/deepseek-v4.1-flash", want: "deepseek-v4-flash-0731"},
+		{name: "loomy prefix on the legacy DeepSeek id", payloadModel: "loomy/deepseek-v4-flash-0731", want: "DeepSeek-V4.1-Flash"},
+		{name: "loomy prefix on DeepSeek-V4.1-Flash", payloadModel: "loomy/DeepSeek-V4.1-Flash", want: "DeepSeek-V4.1-Flash"},
+		{name: "loomy prefix is case-insensitive before the DeepSeek map", payloadModel: "LOOMY/deepseek-v4.1-flash", want: "DeepSeek-V4.1-Flash"},
 		{name: "loomy prefix on qwen", payloadModel: "loomy/qwen3.8-flash", want: "qwen3.8-flash"},
 		{name: "account-id prefix", payloadModel: "abcd1234/GLM-5.3-Flash", want: "GLM-5.3-Flash"},
 		{name: "legacy spark-x", payloadModel: "spark-x", want: "spark-x2.6"},
@@ -773,7 +773,7 @@ func TestChatRequestBodySendsBareUpstreamModel(t *testing.T) {
 			name:         "host-stripped request.Model wins over a prefixed payload",
 			requestModel: "DeepSeek-V4.1-Flash",
 			payloadModel: "loomy/qwen3.8-flash",
-			want:         "deepseek-v4-flash-0731",
+			want:         "DeepSeek-V4.1-Flash",
 		},
 		{
 			name:         "a prefixed request.Model is stripped too",
@@ -806,9 +806,9 @@ func TestChatRequestBodySendsBareUpstreamModel(t *testing.T) {
 	}
 }
 
-// A request for the shared DeepSeek-V4.1-Flash name reaches Loomy as its own id,
+// A request for DeepSeek-V4.1-Flash reaches Loomy as that same upstream id,
 // whether the translated payload names the model or only the request does, and
-// keeps its thinking level because the shared entry declares the same levels.
+// keeps its thinking level because the catalogue entry declares levels.
 func TestPerformInferSendsSharedNameAsLoomyID(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -832,8 +832,8 @@ func TestPerformInferSendsSharedNameAsLoomyID(t *testing.T) {
 			if _, errExecute := handleExecutorExecute(testHost(), executorPayload(t, sampleCredential(t), "DeepSeek-V4.1-Flash", testCase.payload)); errExecute != nil {
 				t.Fatalf("executor.execute: %v", errExecute)
 			}
-			if sent["model"] != "deepseek-v4-flash-0731" {
-				t.Fatalf("outbound model = %v, want the Loomy id deepseek-v4-flash-0731", sent["model"])
+			if sent["model"] != "DeepSeek-V4.1-Flash" {
+				t.Fatalf("outbound model = %v, want DeepSeek-V4.1-Flash", sent["model"])
 			}
 			if sent["reasoning_effort"] != "high" {
 				t.Fatalf("outbound reasoning_effort = %v, want the declared level kept", sent["reasoning_effort"])
@@ -850,7 +850,8 @@ func TestPerformInferStripsPrefixBeforeUpstream(t *testing.T) {
 		model string
 		want  string
 	}{
-		{model: "loomy/DeepSeek-V4.1-Flash", want: "deepseek-v4-flash-0731"},
+		{model: "loomy/DeepSeek-V4.1-Flash", want: "DeepSeek-V4.1-Flash"},
+		{model: "loomy/deepseek-v4-flash-0731", want: "DeepSeek-V4.1-Flash"},
 		{model: "abcd1234/GLM-5.3-Flash", want: "GLM-5.3-Flash"},
 		{model: "spark-x", want: "spark-x2.6"},
 	}

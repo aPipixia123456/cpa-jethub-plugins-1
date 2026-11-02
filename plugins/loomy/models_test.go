@@ -87,15 +87,14 @@ func TestLoomyDisplayName(t *testing.T) {
 
 // The bundled table is the 8 documented entries — ids, display names and
 // context windows (`loomy-product.ts:74-83`) — plus the shared
-// `DeepSeek-V4.1-Flash` name right after the Loomy DeepSeek entry.
+// DeepSeek V4.1 Flash is listed once under its current upstream id.
 func TestFallbackCatalogueMatchesSpec(t *testing.T) {
 	want := []struct {
 		id      string
 		display string
 		context int64
 	}{
-		{"deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731 · x3.0", 1_048_576},
-		{"DeepSeek-V4.1-Flash", "DeepSeek V4 Flash 0731 · x3.0", 1_048_576},
+		{"DeepSeek-V4.1-Flash", "DeepSeek V4.1 Flash · x2.0", 1_048_576},
 		{"MiniMax-M3", "MiniMax M3 · x4.0", 1_048_576},
 		{"Kimi-k2.6", "Kimi k2.6 · x6.5", 262_144},
 		{"qwen-3.8-max", "Qwen 3.8 Max · x12.0", 1_000_000},
@@ -143,16 +142,18 @@ func TestSparkX26KeepsRemoteContextWindow(t *testing.T) {
 	t.Fatal("spark-x2.6 is missing from the fallback catalogue")
 }
 
-// upstreamModelID is case-insensitive and rewrites the two names Loomy will not
-// accept as sent: the shared DeepSeek name, and the retired spark-x id.
+// upstreamModelID is case-insensitive: DeepSeek-V4.1-Flash (any casing) and the
+// retired deepseek-v4-flash-0731 both become the canonical DeepSeek id; spark-x
+// becomes spark-x2.6.
 func TestUpstreamModelIDMapsSharedAndLegacyNames(t *testing.T) {
 	cases := []struct {
 		input string
 		want  string
 	}{
-		{"DeepSeek-V4.1-Flash", "deepseek-v4-flash-0731"},
-		{"deepseek-v4.1-flash", "deepseek-v4-flash-0731"},
-		{"DEEPSEEK-V4.1-FLASH", "deepseek-v4-flash-0731"},
+		{"DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash"},
+		{"deepseek-v4.1-flash", "DeepSeek-V4.1-Flash"},
+		{"DEEPSEEK-V4.1-FLASH", "DeepSeek-V4.1-Flash"},
+		{"deepseek-v4-flash-0731", "DeepSeek-V4.1-Flash"},
 		{"spark-x", "spark-x2.6"},
 		{"SPARK-X", "spark-x2.6"},
 		{"Spark-X", "spark-x2.6"},
@@ -480,30 +481,24 @@ func TestDiscoverModelsFallsBackOnFailure(t *testing.T) {
 	}
 }
 
-// The live catalogue gets the shared DeepSeek name the same way the bundled
-// table does: right after the Loomy entry, only when that entry is listed, and
-// never twice.
-func TestWithPublicNamesFollowsTheLoomyEntry(t *testing.T) {
-	remote := []modelDescriptor{
-		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek V4 Flash 0731 · x3.0", Efforts: []string{"low", "high"}, Remote: true},
-		{ID: "GLM-5.3-Flash", Name: "GLM 5.3 Flash · x0.8", Remote: true},
+// bareUpstreamModel strips a CPA prefix then applies upstreamModelID, so a
+// legacy DeepSeek id or a casing variant becomes the canonical upstream id.
+func TestBareUpstreamModelNormalizesDeepSeek(t *testing.T) {
+	withSettings(t, DefaultConfig())
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"loomy/DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash"},
+		{"loomy/deepseek-v4.1-flash", "DeepSeek-V4.1-Flash"},
+		{"loomy/deepseek-v4-flash-0731", "DeepSeek-V4.1-Flash"},
+		{"deepseek-v4-flash-0731", "DeepSeek-V4.1-Flash"},
+		{"loomy/spark-x", "spark-x2.6"},
 	}
-	got := withPublicNames(remote)
-	ids := make([]string, 0, len(got))
-	for _, entry := range got {
-		ids = append(ids, entry.ID)
-	}
-	if strings.Join(ids, ",") != "deepseek-v4-flash-0731,DeepSeek-V4.1-Flash,GLM-5.3-Flash" {
-		t.Fatalf("ids = %v, want the shared name right after the Loomy entry", ids)
-	}
-	if strings.Join(got[1].Efforts, ",") != "low,high" {
-		t.Fatalf("shared entry levels = %v, want the Loomy entry's levels", got[1].Efforts)
-	}
-	if again := withPublicNames(got); len(again) != len(got) {
-		t.Fatalf("a listing that already has the shared name grew to %d entries", len(again))
-	}
-	if without := withPublicNames(remote[1:]); len(without) != 1 {
-		t.Fatalf("a listing without the Loomy entry grew to %d entries", len(without))
+	for _, testCase := range cases {
+		if got := bareUpstreamModel(testCase.input); got != testCase.want {
+			t.Errorf("bareUpstreamModel(%q) = %q, want %q", testCase.input, got, testCase.want)
+		}
 	}
 }
 
