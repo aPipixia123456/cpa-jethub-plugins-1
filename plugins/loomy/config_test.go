@@ -119,6 +119,13 @@ func TestConfigFieldsAreDeclared(t *testing.T) {
 		"sms_keyword":          "string",
 		"sms_api_base":         "string",
 		"sms_wait_ms":          "integer",
+		"user_agent":           "string",
+		"loomy_version":        "string",
+		"proxy_url":            "string",
+		"credential_key_file":  "string",
+		"checkin_window_start": "string",
+		"checkin_window_end":   "string",
+		"risk_pause_sec":       "integer",
 	}
 	seen := map[string]bool{}
 	for _, field := range fields {

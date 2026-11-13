@@ -73,3 +73,25 @@ func boolString(value bool) string {
 	}
 	return "false"
 }
+
+// isAccountDisabledErr reports a 100003 platform-disabled failure.
+func isAccountDisabledErr(err error) bool {
+	var envelopeError *abiboot.EnvelopeError
+	return errors.As(err, &envelopeError) && envelopeError != nil && envelopeError.Code == "account_disabled"
+}
+
+// isAuthExpiredErr reports a 100002 dead-session failure.
+func isAuthExpiredErr(err error) bool {
+	var envelopeError *abiboot.EnvelopeError
+	if !errors.As(err, &envelopeError) || envelopeError == nil {
+		return false
+	}
+	return envelopeError.Code == "auth_expired" || envelopeError.Code == "credential_expired"
+}
+
+// isRiskControlErr reports a 403 risk-control failure (never a re-login).
+func isRiskControlErr(err error) bool {
+	var envelopeError *abiboot.EnvelopeError
+	return errors.As(err, &envelopeError) && envelopeError != nil &&
+		(envelopeError.Code == "risk_control" || envelopeError.Code == "risk_breaker")
+}

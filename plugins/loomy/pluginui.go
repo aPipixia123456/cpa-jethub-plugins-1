@@ -48,8 +48,8 @@ func renderStatusPage(h *abiboot.Host, request pluginapi.ManagementRequest) plug
 		plugui.Field{Label: "线上目录缓存", Value: catalogueCacheText()},
 		plugui.Field{Label: "后台自动刷新", Value: autoRefreshText(cfg)},
 		plugui.Field{Label: "登录页", Value: loginResourcePath},
-		plugui.Field{Label: "会话续期", Value: "不支持：Loomy 没有 refresh 端点，" +
-			"auth.refresh 只对 " + PointsRecordsPath + " 做一次有效性探测"},
+		plugui.Field{Label: "会话续期", Value: "已保存密码的账号在剩余不足 4 天或探活失败时自动用密码重登；" +
+			"没有密码时 auth.refresh 只对 " + PointsRecordsPath + " 做有效性探测。上游没有 refresh_token，也没有设密码接口。"},
 	))
 
 	accounts := loomyAccounts(h)
@@ -179,7 +179,8 @@ func accountTableCard(quotas []accountQuota) template.HTML {
 			{Label: "操作"},
 		}, rows),
 		plugui.Note("积分分两个池：永久积分（注册与任务奖励）和每日赠送（"+dailyQuotaDescription+"），可用为两者之和。"+
-			"可自动续期：否（无 refresh_token，过期只能重新登录）。"+
+			"已保存密码的账号可自动续登（剩余不足 4 天时用密码重登）；未保存密码的账号过期后需重新登录。"+
+			"上游没有设密码接口，密码须已在官方客户端设置过，仅加密保存在本地。"+
 			"表中积分取自最近一次读取，账号池巡检会定期更新；点「刷新积分」逐个账号重新查询。"),
 	))
 }
@@ -584,6 +585,8 @@ func loginSMSCard(cfg Config, request pluginapi.ManagementRequest, session *logi
 		}
 		actions = append(actions,
 			plugui.Action{Label: "自动接码登录", Query: "action=" + autoActionConfirm + "&state=" + state, Kind: "primary"},
+			plugui.Action{Label: "用手机号+密码登录", Path: passwordLoginPath, Query: "state=" + state},
+			plugui.Action{Label: "填写续登密码（可选）", Path: passwordSavePath, Query: "state=" + state},
 		)
 		return plugui.Card("手机验证码登录", plugui.Group(plugui.Fields(fields...), noticeForDraft(draft)), actions...)
 	}
@@ -591,6 +594,8 @@ func loginSMSCard(cfg Config, request pluginapi.ManagementRequest, session *logi
 	actions = append(actions,
 		plugui.Action{Label: "发送验证码", Query: "action=send&state=" + state + "&phone=" + phone, Kind: "primary"},
 		plugui.Action{Label: "自动接码登录", Query: "action=" + autoActionConfirm + "&state=" + state},
+		plugui.Action{Label: "用手机号+密码登录", Path: passwordLoginPath, Query: "state=" + state + "&phone=" + phone},
+		plugui.Action{Label: "填写续登密码（可选）", Path: passwordSavePath, Query: "state=" + state + "&phone=" + phone},
 		plugui.Action{Label: "换一个号码", Query: "action=" + phoneActionClear + "&state=" + state},
 	)
 	return plugui.Card("手机验证码登录", plugui.Group(plugui.Fields(fields...)), actions...)
@@ -842,6 +847,7 @@ func loginSuccessPage(session *loginSession, credential *Credential, method stri
 		),
 		plugui.Action{Label: "查看状态", Path: "status", Kind: "primary"},
 		plugui.Action{Label: "再登一个账号", Path: "login", Query: plugui.AddAccountQuery},
+		plugui.Action{Label: "保存续登密码", Path: passwordSavePath, Query: passwordSaveQuery(session, credential)},
 	))
 }
 
@@ -934,7 +940,7 @@ func renderCheckinPage(h *abiboot.Host, request pluginapi.ManagementRequest) plu
 				plugui.Action{Label: "返回状态", Path: "status"},
 			))
 	}
-	outcome := claimDailyGrant(h, credential, settings())
+	outcome := claimDailyGrantFor(h, credential, settings(), authFileName(entry))
 	fields := []plugui.Field{{Label: "账号", Value: entry.Name}}
 	if outcome.Credit > 0 {
 		fields = append(fields, plugui.Field{Label: "本次额度", Value: trimAmount(outcome.Credit)})
@@ -995,6 +1001,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 	case "claim":
 		outcome, errOutcome := claimAllOnboarding(h, credential, cfg)
 		if errOutcome != nil {
+			parkIfAccountDisabled(h, authFileName(entry), credential, errOutcome)
 			notice = plugui.Notice("danger", "领取失败："+errOutcome.Error())
 		} else if len(outcome.Claimed) == 0 {
 			notice = plugui.Notice("", outcome.Message)
@@ -1007,6 +1014,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 		already, errComplete := completeOnboardingTask(h, credential, key, cfg)
 		switch {
 		case errComplete != nil:
+			parkIfAccountDisabled(h, authFileName(entry), credential, errComplete)
 			notice = plugui.Notice("danger", "提交失败："+errComplete.Error())
 		case already:
 			notice = plugui.Notice("", "该任务此前已完成（alreadyCompleted=true，同样算成功）")
@@ -1017,6 +1025,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 
 	state, errState := fetchOnboardingState(h, credential, cfg)
 	if errState != nil {
+		parkIfAccountDisabled(h, authFileName(entry), credential, errState)
 		return pluguiPage("Loomy 一次性任务",
 			plugui.Card("任务状态读取失败",
 				plugui.Group(notice, plugui.Notice("danger", errState.Error())),

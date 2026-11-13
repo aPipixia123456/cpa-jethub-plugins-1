@@ -163,7 +163,9 @@ func signRequest(accessKeyID, accessKeySecret string, in signInput) http.Header 
 // accountHeaders signs one account call with the instance credentials, falling
 // back to the embedded pair when the settings do not override them.
 func accountHeaders(cfg Config, in signInput) http.Header {
-	return signRequest(cfg.accountAK(), cfg.accountSK(), in)
+	headers := signRequest(cfg.accountAK(), cfg.accountSK(), in)
+	headers.Set("User-Agent", cfg.clientUA())
+	return headers
 }
 
 // accountAK resolves the access key id: the setting wins, otherwise the value

@@ -164,7 +164,7 @@ func TestPageKeepsTheHonestNoRefreshWording(t *testing.T) {
 		Query: map[string][]string{"auth_index": {loomyLiveIndex}},
 	})
 	body := string(page.Body)
-	if !strings.Contains(body, "否（无 refresh_token，过期只能重新登录）") {
+	if !strings.Contains(body, "上游没有 refresh_token") || !strings.Contains(body, "没有设密码接口") || !strings.Contains(body, "未保存密码的账号过期后需重新登录") {
 		t.Fatalf("the card lost its honest no-refresh wording:\n%s", body)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -33,6 +34,10 @@ const (
 	// host; it is a different code from the business `100002`
 	// (`loomy-oauth.ts:117-119`, trap #9).
 	accountLoginStateCode = "020002"
+	// accountDisabledCode means the account was suspended by the platform.
+	// It is NOT a session expiry: the credential must be parked and must
+	// not be re-logged-in (even if a password is stored).
+	accountDisabledCode = "100003"
 )
 
 // flexText decodes a JSON field that may arrive as a string, a number, a boolean
@@ -135,6 +140,10 @@ func (e *envelope) text() string {
 // isAuthExpired reports the terminal session failure.
 func (e *envelope) isAuthExpired() bool { return e.code() == authExpiredCode }
 
+// isAccountDisabled reports that the platform has suspended the account
+// (upstream 100003). Distinct from 100002: no re-login, park the credential.
+func (e *envelope) isAccountDisabled() bool { return e.code() == accountDisabledCode }
+
 // decodeData decodes the `data` object into out. Loomy does not validate `data`
 // (`loomy.ts:103`), so a missing body is not an error here either.
 func (e *envelope) decodeData(out any) error {
@@ -161,10 +170,26 @@ func envelopeFailure(op string, env *envelope) error {
 	if env.isAuthExpired() {
 		return credentialError("auth_expired", "%s 失败：会话已失效（%s），请重新登录该账号", op, message)
 	}
+	if env.isAccountDisabled() {
+		return accountDisabledError(op, message)
+	}
 	if env.code() == badRequestCode {
 		return statusError(false, "bad_request", 400, "%s 失败：%s", op, message)
 	}
 	return transportError("upstream_business_error", "%s 失败（code %s）：%s", op, env.code(), message)
+}
+
+// accountDisabledError is the 403 returned for upstream 100003. It does
+// not itself persist the park: callers that have a host and a file name
+// must also call parkIfAccountDisabled (or markPlatformDisabled) so CPA
+// stops routing to the account. The 403 (not 401) keeps a password-backed
+// refresh from treating this as "session expired, try logging in again".
+func accountDisabledError(op, message string) error {
+	if message == "" {
+		message = "账号已被平台停用"
+	}
+	return statusError(false, "account_disabled", http.StatusForbidden,
+		"%s 失败：账号已被平台停用（100003）：%s", op, message)
 }
 
 // envelopeErrorText renders the `error`-style payload some gateways return

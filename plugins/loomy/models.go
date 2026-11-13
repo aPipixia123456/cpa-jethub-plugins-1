@@ -494,7 +494,7 @@ func discoverModels(h *abiboot.Host, credential *Credential, cfg Config) []model
 	if credential == nil {
 		return nil
 	}
-	response, errDo := hostRequest(h, http.MethodGet, APIBase+ModelsPath, businessHeaders(credential, false), nil, cfg)
+	response, errDo := hostRequest(h, http.MethodGet, APIBase+ModelsPath, businessHeaders(credential, false), nil, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return nil
 	}

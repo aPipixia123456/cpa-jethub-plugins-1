@@ -37,6 +37,23 @@ type Credential struct {
 	ExpiresAt string `json:"expires_at,omitempty"`
 	// Type is the CPA auth file discriminator.
 	Type string `json:"type,omitempty"`
+	// ProxyURL is an optional per-account HTTP(S)/SOCKS5 proxy. It wins over
+	// the process-wide `proxy_url` setting, and is also published on
+	// AuthData.ProxyURL so the host can honour it.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// PasswordEnc is the AES-256-GCM ciphertext of a user-supplied password
+	// (`v1:` + base64). The plaintext is never written when encryption works.
+	PasswordEnc string `json:"password_enc,omitempty"`
+	// RenewFailures counts consecutive password re-login failures, used to
+	// pick the 30m/2h/6h/12h backoff.
+	RenewFailures int `json:"renew_failures,omitempty"`
+	// PlatformDisabled is set when upstream returned 100003 (account banned
+	// by the platform). A credential with this flag is not re-logged-in.
+	PlatformDisabled bool `json:"platform_disabled,omitempty"`
+	// passwordPlain is the in-memory plaintext. It is populated from
+	// PasswordEnc on read, from a legacy `password` field, or from SetPassword.
+	// Encode never serialises this field (the json tag is "-").
+	passwordPlain string `json:"-"`
 }
 
 // phonePattern is the plugin's ONLY phone gate, applied to a trimmed string
@@ -141,15 +158,73 @@ func (c *Credential) Expired(now time.Time) bool {
 }
 
 // Encode serialises the credential for storage in the CPA auth file.
+//
+// A stored password is written as `password_enc` whenever the key file is
+// usable. If encryption fails, a plaintext `password` field is used as a
+// last resort (the host is then asked to chmod the file 0600). The in-memory
+// plaintext is never the primary on-disk form.
 func (c *Credential) Encode() (json.RawMessage, error) {
 	if c.Type == "" {
 		c.Type = ProviderKey
+	}
+	plaintext := c.Password()
+	encryptedOK := false
+	if plaintext != "" {
+		enc, errEnc := encryptPassword(plaintext)
+		if errEnc == nil && enc != "" {
+			c.PasswordEnc = enc
+			encryptedOK = true
+		}
 	}
 	raw, errMarshal := json.Marshal(c)
 	if errMarshal != nil {
 		return nil, abiboot.Errorf("encode_credential", "encode Loomy credential: %v", errMarshal)
 	}
+	if plaintext != "" && !encryptedOK {
+		raw = insertJSONString(raw, "password", plaintext)
+	}
 	return json.RawMessage(raw), nil
+}
+
+// SetPassword records a user-supplied password in memory. The next Encode
+// writes it as password_enc.
+func (c *Credential) SetPassword(password string) {
+	if c == nil {
+		return
+	}
+	c.passwordPlain = password
+	if password == "" {
+		c.PasswordEnc = ""
+	}
+}
+
+// Password returns the in-memory plaintext, decrypting PasswordEnc if needed.
+// Callers must never log, print or put this value in a page or URL.
+func (c *Credential) Password() string {
+	if c == nil {
+		return ""
+	}
+	if c.passwordPlain != "" {
+		return c.passwordPlain
+	}
+	if c.PasswordEnc == "" {
+		return ""
+	}
+	plain, errDec := decryptPassword(c.PasswordEnc)
+	if errDec != nil {
+		return ""
+	}
+	c.passwordPlain = plain
+	return plain
+}
+
+// HasPassword reports whether a password is stored, without decrypting it
+// when only the ciphertext is present.
+func (c *Credential) HasPassword() bool {
+	if c == nil {
+		return false
+	}
+	return c.passwordPlain != "" || c.PasswordEnc != ""
 }
 
 // ParseCredential decodes and validates an auth-file payload.

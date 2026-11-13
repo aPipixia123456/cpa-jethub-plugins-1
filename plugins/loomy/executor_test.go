@@ -693,7 +693,7 @@ func TestInferFailureClassification(t *testing.T) {
 		want   int
 	}{
 		{http.StatusUnauthorized, `{"error":{"message":"bad token"}}`, http.StatusUnauthorized},
-		{http.StatusForbidden, `{"error":{"message":"forbidden"}}`, http.StatusUnauthorized},
+		{http.StatusForbidden, `{"error":{"message":"forbidden"}}`, http.StatusForbidden},
 		{http.StatusTooManyRequests, `{"error":{"message":"slow down"}}`, http.StatusTooManyRequests},
 		{http.StatusPaymentRequired, `{"error":{"message":"no points"}}`, http.StatusPaymentRequired},
 		{http.StatusInternalServerError, `{"error":{"message":"boom"}}`, http.StatusBadGateway},

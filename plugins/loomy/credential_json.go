@@ -27,7 +27,19 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 	}
 	// The alias drops this method, so the decode below cannot recurse.
 	type plain Credential
-	return json.Unmarshal(sanitized, (*plain)(c))
+	if errPlain := json.Unmarshal(sanitized, (*plain)(c)); errPlain != nil {
+		return errPlain
+	}
+	// Loomy2api-CPAMC and a manual edit may have a plaintext `password`.
+	// Accept it, keep it in memory, and let the next Encode migrate it
+	// to password_enc. Existing files without either field stay valid.
+	var extra struct {
+		Password string `json:"password"`
+	}
+	if json.Unmarshal(sanitized, &extra) == nil && extra.Password != "" && c.passwordPlain == "" {
+		c.passwordPlain = extra.Password
+	}
+	return nil
 }
 
 // dropNonStringField removes a top-level field whose value is neither a string

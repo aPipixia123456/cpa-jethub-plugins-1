@@ -24,7 +24,7 @@ const (
 	// (`loomy-product.ts:90`).
 	DisplayName = "Loomy (讯飞)"
 	// Version is the plugin release version.
-	Version = "0.1.25"
+	Version = "0.1.27"
 	// Author identifies the plugin author organization.
 	Author = "cpa-jethub"
 	// Repository is the public source location of this plugin.
@@ -94,6 +94,9 @@ const (
 	// NOT be "fixed": the Windows client sends the same value
 	// (`loomy-oauth.ts:65-66`, trap #25).
 	AccountUA = "Loomy|Desktop|Electron|macOS"
+	// DefaultLoomyVersion is the official desktop `loomy-version` header
+	// (Loomy2api-CPAMC upstream.go, confirmed 0.9.39 as of 2026-11-11).
+	DefaultLoomyVersion = "0.9.39"
 )
 
 // Timeouts and lifetimes, each the value the TypeScript source uses.
@@ -171,6 +174,30 @@ type Config struct {
 	// 0 disables the cache and every read hits upstream.
 	PointsCacheTTLMS int
 
+	// UserAgent is the HTTP User-Agent and the login-envelope `ua` sent to
+	// the gateway and the account host. Empty uses AccountUA.
+	UserAgent string
+	// LoomyVersion is the `loomy-version` header. Empty uses DefaultLoomyVersion.
+	LoomyVersion string
+	// ProxyURL is a process-wide HTTP(S)/SOCKS5 proxy used when a credential
+	// does not carry its own `proxy_url`.
+	ProxyURL string
+	// CredentialKeyFile is the 0600 AES key used to encrypt stored passwords.
+	// Empty uses `$XDG_CONFIG_HOME/loomy-provider/credential.key`.
+	CredentialKeyFile string
+	// CheckinWindowStart / CheckinWindowEnd bound the daily auto-check-in
+	// window in Asia/Shanghai (default 00:10–06:00).
+	CheckinWindowStart string
+	CheckinWindowEnd   string
+	// RiskPauseSec is how long the risk circuit breaker holds requests after
+	// two accounts are 403'd inside 10 minutes. 0 disables the breaker.
+	// A negative value is treated as 0. DefaultConfig fills 1800; a user
+	// who writes `risk_pause_sec: 0` disables it.
+	RiskPauseSec int
+	// riskPauseSet is true when risk_pause_sec was present in the YAML, so
+	// a literal 0 can disable the breaker without colliding with "unset".
+	riskPauseSet bool
+
 	// Pool holds the account-pool scanner settings, decoded from the `pool_*`
 	// keys of the same YAML block.
 	Pool pool.Config
@@ -186,17 +213,22 @@ type Config struct {
 // DefaultConfig returns the settings used when the user provides nothing.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:           true,
-		ModelPrefix:       true,
-		ModelPrefixName:   "loomy",
-		SMSCodeTTLSeconds: SMSCodeTTLSeconds,
-		SessionTTLSeconds: SessionTTLSeconds,
-		LoginTimeoutMS:    LoginTimeoutMS,
-		RequestTimeoutMS:  RequestTimeoutMS,
-		ModelCacheTTLMS:   ModelCacheTTLMS,
-		ModelRefreshMS:    0,
-		PointsCacheTTLMS:  30_000,
-		Pool:              pool.DefaultConfig(),
+		Enabled:            true,
+		ModelPrefix:        true,
+		ModelPrefixName:    "loomy",
+		SMSCodeTTLSeconds:  SMSCodeTTLSeconds,
+		SessionTTLSeconds:  SessionTTLSeconds,
+		LoginTimeoutMS:     LoginTimeoutMS,
+		RequestTimeoutMS:   RequestTimeoutMS,
+		ModelCacheTTLMS:    ModelCacheTTLMS,
+		ModelRefreshMS:     0,
+		PointsCacheTTLMS:   30_000,
+		UserAgent:          AccountUA,
+		LoomyVersion:       DefaultLoomyVersion,
+		CheckinWindowStart: pool.DefaultCheckinWindowStart,
+		CheckinWindowEnd:   pool.DefaultCheckinWindowEnd,
+		RiskPauseSec:       defaultRiskPauseSec,
+		Pool:               pool.DefaultConfig(),
 	}
 }
 
@@ -249,7 +281,26 @@ func ConfigFromYAML(document []byte) Config {
 		// also accept seconds form used by older aPipixia configs
 		cfg.SMSWaitMS = coerceInt(raw["sms_wait_seconds"], 0) * 1000
 	}
+	cfg.UserAgent = coerceString(raw["user_agent"], cfg.UserAgent)
+	cfg.LoomyVersion = coerceString(raw["loomy_version"], cfg.LoomyVersion)
+	cfg.ProxyURL = coerceString(raw["proxy_url"], cfg.ProxyURL)
+	cfg.CredentialKeyFile = coerceString(raw["credential_key_file"], cfg.CredentialKeyFile)
+	cfg.CheckinWindowStart = coerceString(raw["checkin_window_start"], cfg.CheckinWindowStart)
+	cfg.CheckinWindowEnd = coerceString(raw["checkin_window_end"], cfg.CheckinWindowEnd)
+	if _, present := raw["risk_pause_sec"]; present {
+		cfg.riskPauseSet = true
+		cfg.RiskPauseSec = coerceInt(raw["risk_pause_sec"], 0)
+	}
 	cfg.Pool = pool.ConfigFromMap(raw, "pool_")
+	// Unprefixed window keys win, but only when the operator actually wrote
+	// them: otherwise a DefaultConfig value of "00:10" would clobber a
+	// distinct pool_checkin_window_start.
+	if _, present := raw["checkin_window_start"]; present {
+		cfg.Pool.CheckinWindowStart = cfg.CheckinWindowStart
+	}
+	if _, present := raw["checkin_window_end"]; present {
+		cfg.Pool.CheckinWindowEnd = cfg.CheckinWindowEnd
+	}
 	return cfg
 }
 
@@ -363,6 +414,20 @@ func ConfigFields() []configField {
 			Description: "接码平台 API 地址（默认 https://api.d1jiema.com/zc/data.php）"},
 		{Name: "sms_wait_ms", Type: "integer",
 			Description: "自动接码等待短信的最长时间，毫秒（默认 90000）。也兼容 sms_wait_seconds"},
+		{Name: "user_agent", Type: "string",
+			Description: "发往网关和账号服务的 User-Agent，同时作为登录请求的 ua 字段（默认 Loomy|Desktop|Electron|macOS）"},
+		{Name: "loomy_version", Type: "string",
+			Description: "发往网关的 loomy-version 请求头（默认 0.9.39，与官方桌面端 / Loomy2api-CPAMC 一致）"},
+		{Name: "proxy_url", Type: "string",
+			Description: "全局 HTTP(S)/SOCKS5 代理，当某个凭据没有自己的 proxy_url 时使用"},
+		{Name: "credential_key_file", Type: "string",
+			Description: "用于加密本地密码的密钥文件路径（权限 0600）。留空则写到用户配置目录 loomy-provider/credential.key"},
+		{Name: "checkin_window_start", Type: "string",
+			Description: "自动签到窗口开始时间（默认 00:10，Asia/Shanghai）。每个账号在窗口内有一个按天稳定的随机时刻，避免 00:00 扎堆"},
+		{Name: "checkin_window_end", Type: "string",
+			Description: "自动签到窗口结束时间（默认 06:00，Asia/Shanghai）。窗口结束后仍未签到的账号会补签"},
+		{Name: "risk_pause_sec", Type: "integer",
+			Description: "风控熔断时长，秒（默认 1800）。10 分钟内有 2 个及以上账号被上游 403/TM.* 拒绝时暂停派发；0 关闭熔断。403 不会触发重新登录"},
 	}
 }
 
@@ -423,4 +488,37 @@ func (c Config) defaultPhone(override string) string {
 		return trimmed
 	}
 	return normalizePhone(c.Phone)
+}
+
+// clientUA is the official-client User-Agent sent on every gateway request
+// and as the login envelope `ua`. The default must stay the macOS Electron
+// value (trap #25); a setting only overrides it when non-empty.
+func (c Config) clientUA() string {
+	if trimmed := strings.TrimSpace(c.UserAgent); trimmed != "" {
+		return trimmed
+	}
+	return AccountUA
+}
+
+// loomyVersion is the official-client `loomy-version` header.
+func (c Config) loomyVersion() string {
+	if trimmed := strings.TrimSpace(c.LoomyVersion); trimmed != "" {
+		return trimmed
+	}
+	return DefaultLoomyVersion
+}
+
+// riskPauseSeconds is the circuit-breaker hold. 0 disables it. The default
+// is 1800 when the field was left unset.
+func (c Config) riskPauseSeconds() int {
+	if c.riskPauseSet {
+		if c.RiskPauseSec < 0 {
+			return 0
+		}
+		return c.RiskPauseSec
+	}
+	if c.RiskPauseSec > 0 {
+		return c.RiskPauseSec
+	}
+	return defaultRiskPauseSec
 }
