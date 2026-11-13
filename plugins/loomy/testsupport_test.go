@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -130,6 +132,16 @@ func resetTestState() {
 	shutdownLoginSessions()
 	resetDiscoveredModels()
 	resetPointsCache()
+	resetRiskBreaker()
+	disableImpersonatedTransport()
+	// Pin the credential key to a temp file so tests never touch a real
+	// operator key under $XDG_CONFIG_HOME.
+	if keyPathOver == "" || !strings.HasPrefix(keyPathOver, os.TempDir()) {
+		dir, errDir := os.MkdirTemp("", "loomy-cred-key-")
+		if errDir == nil {
+			setCredentialKeyFile(filepath.Join(dir, "credential.key"))
+		}
+	}
 }
 
 // callsFor returns every recorded request whose URL contains match.

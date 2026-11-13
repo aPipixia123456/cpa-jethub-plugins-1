@@ -123,11 +123,12 @@ func runScan(h *abiboot.Host, cfg Config, reason string) scanOutcome {
 		return outcome
 	}
 
+	sweep := &checkinSweep{}
 	for _, entry := range entries {
 		if !isLoomyEntry(entry) {
 			continue
 		}
-		report := reconcileAccount(h, cfg, entry, status)
+		report := reconcileAccount(h, cfg, entry, status, sweep)
 		outcome.Accounts = append(outcome.Accounts, report)
 		switch report.Action {
 		case actionDisabled:
@@ -158,7 +159,11 @@ func isLoomyEntry(entry pluginapi.HostAuthFileEntry) bool {
 // A fresh Host is used per account: Host.Incoming is sticky for the whole
 // value, and SaveAuth merges it into the write — sharing one handle across
 // accounts would merge account A's file into account B's.
-func reconcileAccount(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileEntry, status *statusDocument) accountReport {
+// checkinSweep tracks serial claims inside one runScan so later accounts
+// wait a random gap (production only; tests leave checkinWait as a no-op).
+type checkinSweep struct{ claimed int }
+
+func reconcileAccount(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileEntry, status *statusDocument, sweep *checkinSweep) accountReport {
 	report := accountReport{
 		Name:      entry.Name,
 		AuthIndex: entry.AuthIndex,
@@ -191,7 +196,13 @@ func reconcileAccount(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileE
 	// points are unreadable still gets the claim attempt: the claim is the
 	// only other probe the provider exposes, and its failure carries the same
 	// session-death signal.
-	if found && cfg.Enabled && cfg.AutoCheckin && checkinDue(account) {
+	if found && cfg.Enabled && cfg.AutoCheckin && checkinDueAt(account, time.Now(), cfg) {
+		if sweep != nil {
+			if sweep.claimed > 0 {
+				waitCheckinGap(cfg)
+			}
+			sweep.claimed++
+		}
 		outcome := claimCheckin(h, cfg, entry)
 		report.CheckinResult = outcome.Message
 		if outcome.CheckinText != "" {
@@ -200,6 +211,10 @@ func reconcileAccount(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileE
 		if outcome.Available != nil {
 			report.Available = outcome.Available
 			account = mergeClaimedPoints(account, outcome)
+		}
+		if outcome.PlatformDisabled {
+			account.PointsError = firstNonEmpty(account.PointsError, "账号已被平台停用（100003）")
+			account.Points = nil
 		}
 		if outcome.SessionDead {
 			account.PointsError = firstNonEmpty(account.PointsError, "会话已失效（100002）")
@@ -211,6 +226,8 @@ func reconcileAccount(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileE
 	case !found:
 		report.Detail = "不在状态页账号列表中，不动它"
 		return report
+	case platformDisabledError(account.PointsError), platformDisabledError(account.Error):
+		return disableFor(h, cfg, entry, report, disabledByPlatform, "账号已被平台停用（100003）")
 	case sessionDeadError(account.PointsError), sessionDeadError(account.Error):
 		return disableFor(h, cfg, entry, report, disabledBySession, "会话失效（100002）")
 	case account.Points == nil || availableOf(account) == nil:
@@ -289,10 +306,11 @@ func disableFor(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileEntry, 
 
 // checkinOutcome is what one automatic claim did, in the account's own words.
 type checkinOutcome struct {
-	Message     string
-	Available   *float64
-	CheckinText string
-	SessionDead bool
+	Message          string
+	Available        *float64
+	CheckinText      string
+	SessionDead      bool
+	PlatformDisabled bool
 }
 
 // claimCheckin drives the Loomy daily grant for one account through the
@@ -322,6 +340,11 @@ func claimCheckin(h *abiboot.Host, cfg Config, entry pluginapi.HostAuthFileEntry
 		response.StatusCode == http.StatusUnauthorized {
 		if errDecode := json.Unmarshal(response.Body, &document); errDecode == nil {
 			outcome := checkinOutcome{Message: firstNonEmpty(document.Message, document.Error, "已签到")}
+			if platformDisabledError(document.Message) || platformDisabledError(document.Error) {
+				outcome.PlatformDisabled = true
+				outcome.Message = firstNonEmpty(document.Message, document.Error, "账号已被平台停用（100003）")
+				return outcome
+			}
 			if sessionDeadError(document.Message) || sessionDeadError(document.Error) {
 				outcome.SessionDead = true
 				return outcome
@@ -367,11 +390,7 @@ func mergeClaimedPoints(account statusAccount, outcome checkinOutcome) statusAcc
 // for the current business day — or whether the state is unreadable, in which
 // case attempting the claim is how the pool learns.
 func checkinDue(account statusAccount) bool {
-	if account.Points == nil {
-		return true
-	}
-	cycle := strings.TrimSpace(account.Points.DailyCycleDate)
-	return cycle == "" || cycle < BusinessDay()
+	return checkinDueAt(account, time.Now(), DefaultConfig())
 }
 
 // BusinessDay is Loomy's business date: the service is Chinese, so the cycle
@@ -383,7 +402,17 @@ func BusinessDay() string {
 // sessionDeadError reports whether a provider error string is the session
 // dead code (upstream 100002), the only failure that justifies parking.
 func sessionDeadError(text string) bool {
+	if platformDisabledError(text) {
+		return false
+	}
 	return strings.Contains(text, "100002") || strings.Contains(text, "会话已失效")
+}
+
+// platformDisabledError reports upstream 100003 (account banned by the
+// platform). Distinct from a dead session: the pool parks the credential
+// with disabled_by=loomy:platform and never auto-enables it.
+func platformDisabledError(text string) bool {
+	return strings.Contains(text, "100003") || strings.Contains(text, "已被平台停用")
 }
 
 // statusByName finds the account one host entry names in the status document.
@@ -580,6 +609,7 @@ var scanner = &poolScanner{}
 
 // startScanner (re)configures the background sweep from settings.
 func startScanner(cfg Config) {
+	enableCheckinGaps()
 	scanner.mu.Lock()
 	scanner.interval = time.Duration(cfg.ScanIntervalMS) * time.Millisecond
 	if scanner.cancel != nil || scanner.interval <= 0 {
@@ -596,6 +626,7 @@ func startScanner(cfg Config) {
 
 // stopScanner ends the background loop at shutdown.
 func stopScanner() {
+	disableCheckinGaps()
 	scanner.mu.Lock()
 	cancel := scanner.cancel
 	scanner.cancel = nil

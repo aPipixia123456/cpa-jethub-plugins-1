@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -44,21 +45,18 @@ func handleAuthParse(_ *abiboot.Host, raw json.RawMessage) (any, error) {
 	return pluginapi.AuthParseResponse{Handled: true, Auth: auth}, nil
 }
 
-// handleAuthRefresh PROBES the credential; it does not renew anything.
+// handleAuthRefresh probes the credential and, when a password is stored,
+// renews the session the way Loomy2api-CPAMC does:
 //
-// ⚠️ Loomy has NO refresh endpoint and the credential carries no refresh token
-// at all (`loomy.ts:195-205`, `loomy-auth.ts:4-8`). `isLoomyRefreshable()`
-// returns `false` unconditionally and is described as an honest marker rather
-// than an oversight (`loomy.ts:203-205`). What the reference does instead is a
-// validity probe against the cheapest read-only endpoint, so that is exactly what
-// this handler does:
+//   - 100003 (platform disabled): park the credential, return 403, do not
+//     re-login;
+//   - 403 / TM.* risk control: record a risk hit, return 403, do not re-login;
+//   - password present: probe, then re-login when remaining life is under 4
+//     days or the probe failed; failures back off 30m → 2h → 6h → 12h;
+//   - no password: probe only, same as v0.1.25 (the 16 existing files).
 //
-//   - probe says the session works -> return the SAME credential and schedule the
-//     next probe;
-//   - probe says `100002` -> the credential is dead: fail with 401 so the host
-//     retires it and the user is asked to log in again;
-//   - transport failure or any other business failure -> a retryable 502, never
-//     an expiry (`loomy-auth.ts:350-369`, trap #10).
+// Loomy still has no refresh_token; password re-login is a full sign-in,
+// not a token rotation.
 func handleAuthRefresh(h *abiboot.Host, raw json.RawMessage) (any, error) {
 	request, errDecode := abiboot.Decode[pluginapi.AuthRefreshRequest](raw)
 	if errDecode != nil {
@@ -68,18 +66,110 @@ func handleAuthRefresh(h *abiboot.Host, raw json.RawMessage) (any, error) {
 	if errParse != nil {
 		return nil, errParse
 	}
+	fileName := authNameForHost(request.AuthID, request.Attributes["path"], request.Attributes["source"], credential)
 	cfg := settings()
-	if errProbe := probeCredential(h, credential, cfg); errProbe != nil {
+	now := time.Now()
+
+	if credential.PlatformDisabled {
+		markPlatformDisabled(h, fileName, credential)
+		return nil, accountDisabledError("探测", "账号此前已被平台停用")
+	}
+
+	errProbe := probeCredential(h, credential, cfg)
+	if isAccountDisabledErr(errProbe) {
+		markPlatformDisabled(h, fileName, credential)
 		return nil, errProbe
 	}
-	auth, errAuth := authDataFor(credential, authNameForHost(request.AuthID, request.Attributes["path"], request.Attributes["source"], credential))
+	if errProbe != nil && isRiskRejection(statusOf(errProbe, 0), "", errProbe.Error()) {
+		noteRisk(credential.maskedPhone(), truncate(errProbe.Error(), 200))
+		return nil, riskControlError(statusOf(errProbe, http.StatusForbidden), truncate(errProbe.Error(), 200))
+	}
+
+	alive := errProbe == nil
+	if shouldRenewByPassword(credential, alive, now) {
+		return refreshByPassword(h, cfg, credential, fileName, now)
+	}
+	if errProbe != nil {
+		return nil, errProbe
+	}
+	auth, errAuth := authDataFor(credential, fileName)
 	if errAuth != nil {
 		return nil, errAuth
 	}
 	return pluginapi.AuthRefreshResponse{
 		Auth:             auth,
-		NextRefreshAfter: nextProbeAfter(credential, time.Now()),
+		NextRefreshAfter: nextProbeAfter(credential, now),
 	}, nil
+}
+
+// refreshByPassword performs one password re-login and schedules the next
+// attempt (or the 30m/2h/6h/12h backoff on failure).
+func refreshByPassword(h *abiboot.Host, cfg Config, credential *Credential, fileName string, now time.Time) (any, error) {
+	session, userID, errLogin := loginByPassword(h, cfg, credential.Phone, credential.Password(), now)
+	if errLogin != nil {
+		if isAccountDisabledErr(errLogin) {
+			markPlatformDisabled(h, fileName, credential)
+			return nil, errLogin
+		}
+		if isRiskRejection(statusOf(errLogin, 0), "", errLogin.Error()) {
+			noteRisk(credential.maskedPhone(), truncate(errLogin.Error(), 200))
+			return nil, riskControlError(statusOf(errLogin, http.StatusForbidden), truncate(errLogin.Error(), 200))
+		}
+		credential.RenewFailures++
+		auth, errAuth := authDataFor(credential, fileName)
+		if errAuth != nil {
+			return nil, errLogin
+		}
+		next := now.Add(renewBackoff(credential.RenewFailures))
+		auth.NextRefreshAfter = next
+		if h != nil {
+			if saved, errSave := h.SaveAuth(auth.FileName, auth.StorageJSON); errSave == nil && saved != nil {
+				chmodCredentialFile(saved.Path)
+			}
+		}
+		return pluginapi.AuthRefreshResponse{Auth: auth, NextRefreshAfter: next}, nil
+	}
+	password := credential.Password()
+	proxy := credential.ProxyURL
+	fresh := buildCredential(session, firstNonEmpty(userID, credential.UserID), credential.Phone, credential.Nickname, cfg, now)
+	fresh.SetPassword(password)
+	fresh.ProxyURL = proxy
+	fresh.RenewFailures = 0
+	auth, errAuth := authDataFor(fresh, fileName)
+	if errAuth != nil {
+		return nil, errAuth
+	}
+	if h != nil {
+		if saved, errSave := h.SaveAuth(auth.FileName, auth.StorageJSON); errSave == nil && saved != nil {
+			chmodCredentialFile(saved.Path)
+		}
+	}
+	return pluginapi.AuthRefreshResponse{
+		Auth:             auth,
+		NextRefreshAfter: nextProbeAfter(fresh, now),
+	}, nil
+}
+
+// markPlatformDisabled stamps the credential and asks the host to park it
+// so CPA stops routing to this account. It never attempts a re-login.
+func markPlatformDisabled(h *abiboot.Host, fileName string, credential *Credential) {
+	if credential != nil {
+		credential.PlatformDisabled = true
+	}
+	if h == nil || strings.TrimSpace(fileName) == "" {
+		return
+	}
+	overlay, errMarshal := json.Marshal(map[string]any{
+		"disabled":          true,
+		"disabled_by":       "loomy:platform",
+		"platform_disabled": true,
+	})
+	if errMarshal != nil {
+		return
+	}
+	if saved, errSave := h.SaveAuth(fileName, overlay); errSave == nil && saved != nil {
+		chmodCredentialFile(saved.Path)
+	}
 }
 
 // nextProbeAfter decides when the host should probe again.
@@ -130,13 +220,17 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 	if !settings().ModelPrefix {
 		prefix = ""
 	}
+	refreshable := credential.HasPassword() && !credential.PlatformDisabled
 	metadata := map[string]any{
 		"userid":     credential.UserID,
 		"phone":      credential.Phone,
 		"expires_at": credential.ExpiresAtMS(),
-		// There is no refresh token to rotate; the flag keeps the manager from
-		// offering a "renew" affordance that cannot work.
-		"refreshable": false,
+		// Password-backed credentials can be re-logged-in automatically;
+		// there is still no refresh_token. The flag only tells the manager
+		// whether auto-renew is available.
+		"refreshable":       refreshable,
+		"has_password":      credential.HasPassword(),
+		"platform_disabled": credential.PlatformDisabled,
 	}
 	if expiry := credential.Expiry(); !expiry.IsZero() {
 		metadata["expires_at_rfc3339"] = expiry.UTC().Format(time.RFC3339)
@@ -147,6 +241,8 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 		FileName:    fileName,
 		Label:       label,
 		Prefix:      prefix,
+		ProxyURL:    credential.ProxyURL,
+		Disabled:    credential.PlatformDisabled,
 		StorageJSON: storage,
 		Metadata:    metadata,
 		// NOTE: do not use the reserved host attribute name "api_key" here. The
@@ -157,7 +253,7 @@ func authDataFor(credential *Credential, fileName string) (pluginapi.AuthData, e
 			"account":     label,
 			"credential":  ProviderKey,
 			"userid":      credential.UserID,
-			"refreshable": boolString(false),
+			"refreshable": boolString(refreshable),
 		},
 		NextRefreshAfter: nextProbeAfter(credential, time.Now()),
 	}, nil
@@ -185,7 +281,7 @@ func defaultAuthFileName(credential *Credential) string {
 // credentialAdvice is appended to every dead-session answer: there is no refresh
 // token to rotate, so the only remedy is a fresh login (WeChat scan, or SMS).
 func credentialAdvice() string {
-	return "（Loomy 没有 refresh_token，只能用自动接码或手动短信重新登录）"
+	return "（Loomy 没有 refresh_token；已保存密码的账号会自动重登，否则请用自动接码、手动短信或密码登录）"
 }
 
 // modelPrefixFor returns the model prefix shared by every Loomy account.

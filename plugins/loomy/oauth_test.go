@@ -15,20 +15,35 @@ import (
 // fixed field order, the hard-coded macOS UA and the 32-hex trace id
 // (`loomy-oauth.ts:55-71`).
 func TestAccountBodyMatchesGoldenShape(t *testing.T) {
-	body, errBody := accountBody(sendMsgCodeParam{CCode: "86", Phone: "13800138000", Expire: 300}, "0123456789abcdef0123456789abcdef")
+	param := sendMsgCodeParam{CCode: "86", Phone: "13800138000", Expire: 300}
+	// The signing golden vector still uses devid=web; accountBodyIdent with
+	// that identity must keep producing it so the HMAC fixture stays valid.
+	legacy, errLegacy := accountBodyIdent(param, "0123456789abcdef0123456789abcdef", accountIdentity{
+		UA: AccountUA, DeviceID: "web",
+	})
+	if errLegacy != nil {
+		t.Fatalf("accountBodyIdent(web): %v", errLegacy)
+	}
+	if string(legacy) != goldenBody {
+		t.Fatalf("legacy account body = %s\nwant %s", legacy, goldenBody)
+	}
+
+	body, errBody := accountBody(param, "0123456789abcdef0123456789abcdef")
 	if errBody != nil {
 		t.Fatalf("accountBody: %v", errBody)
 	}
-	if string(body) != goldenBody {
-		t.Fatalf("account body = %s\nwant %s", body, goldenBody)
+	wantDevid := deviceIDFor("13800138000")
+	if !strings.Contains(string(body), `"devid":"`+wantDevid+`"`) {
+		t.Fatalf("account body = %s, want stable per-phone devid %s", body, wantDevid)
+	}
+	if strings.Contains(string(body), `"devid":"web"`) {
+		t.Fatal("live account body must use a hashed device id, not the literal web")
 	}
 	if !strings.Contains(string(body), `"ua":"Loomy|Desktop|Electron|macOS"`) {
-		t.Fatal("base.ua is hard-coded to macOS and must not be 'fixed' (trap #25)")
+		t.Fatal("base.ua must stay the official desktop UA and must not be 'fixed' (trap #25)")
 	}
 }
 
-// The signed bytes ARE the sent bytes (trap #4): recomputing the signature from
-// the recorded request body must reproduce the Authorization header.
 func TestAccountCallSignsTheExactBytesItSends(t *testing.T) {
 	fake := newFakeHost()
 	fake.do = func(request abiboot.HTTPDoRequest) (*pluginapi.HTTPResponse, error) {

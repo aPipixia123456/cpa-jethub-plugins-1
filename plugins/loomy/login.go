@@ -106,6 +106,10 @@ type loginSession struct {
 	// exists so the SMS path never requires editing plugin settings: the number
 	// is entered here like any other value, one link per digit.
 	phoneDraft string
+	// password is an optional user-supplied password, remembered for this
+	// session only (never in a URL) and written into the credential on
+	// success. It is set from the management password form or a JSON body.
+	password string
 
 	// wechat is the QR flow's state; the zero value means "no QR requested yet".
 	wechat wechatState
@@ -328,6 +332,24 @@ func (s *loginSession) updateWechat(apply func(*wechatState)) {
 }
 
 // recordVerified stores the credential produced by a successful verify.
+func (s *loginSession) notePassword(password string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.password = password
+}
+
+func (s *loginSession) passwordValue() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.password
+}
+
 func (s *loginSession) recordVerified(credential *Credential, fileName, message string) {
 	s.mu.Lock()
 	s.credential = credential
@@ -535,6 +557,9 @@ func verifyLoginCode(h *abiboot.Host, cfg Config, session *loginSession, phone, 
 		return nil, errCheck
 	}
 	credential := buildCredential(sessionToken, userID, resolvedPhone, "", cfg, now)
+	if password := session.passwordValue(); password != "" {
+		credential.SetPassword(password)
+	}
 	if errStore := storeLoginCredential(h, cfg, session, credential, "登录成功，账号已保存"); errStore != nil {
 		return nil, errStore
 	}
@@ -555,8 +580,12 @@ func storeLoginCredential(h *abiboot.Host, cfg Config, session *loginSession, cr
 		return errAuth
 	}
 	if h != nil {
-		if _, errSave := h.SaveAuth(auth.FileName, auth.StorageJSON); errSave != nil {
+		saved, errSave := h.SaveAuth(auth.FileName, auth.StorageJSON)
+		if errSave != nil {
 			return transportError("save_auth", "保存 Loomy 凭据失败：%v", errSave)
+		}
+		if saved != nil {
+			chmodCredentialFile(saved.Path)
 		}
 	}
 	ensureDailyGrant(h, credential, cfg)

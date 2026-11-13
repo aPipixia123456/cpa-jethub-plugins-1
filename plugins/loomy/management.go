@@ -42,7 +42,15 @@ func handleManagementRegister(_ *abiboot.Host, _ json.RawMessage) (any, error) {
 			{Method: http.MethodGet, Path: "/status", Menu: DisplayName,
 				Description: "账号、模型目录与积分余额（侧边栏入口）"},
 			{Method: http.MethodPost, Path: "/loomy/sms/auto",
-				Description: "自动接码登录（d1jiema；body/query: state；返回 JSON）"},
+				Description: "自动接码登录（d1jiema；body/query: state，可选 password；返回 JSON）"},
+			{Method: http.MethodGet, Path: "/loomy/pwdlogin",
+				Description: "手机号+密码登录表单（Management 路由，支持 POST，不在 GET-only 资源页上）"},
+			{Method: http.MethodPost, Path: "/loomy/pwdlogin",
+				Description: "手机号+密码登录（form 或 JSON：phone, password）"},
+			{Method: http.MethodGet, Path: "/loomy/pwdsave",
+				Description: "为登录会话或已有凭据保存续登密码的表单"},
+			{Method: http.MethodPost, Path: "/loomy/pwdsave",
+				Description: "保存续登密码（form 或 JSON：password，以及 state 或 phone/auth）"},
 		}, pool.ManagementRegister()...),
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/login", Description: "自动接码登录 Loomy 账号（auth.login.start / 默认打开确认页）；手动短信验证码作为备用路径"},
@@ -68,6 +76,10 @@ func handleManagementHandle(h *abiboot.Host, raw json.RawMessage) (any, error) {
 	case "/auto":
 		// /loomy/sms/auto — last segment is "auto"
 		return handleSMSAutoJSON(h, request), nil
+	case "/pwdlogin":
+		return handlePasswordLoginPage(h, request), nil
+	case "/pwdsave":
+		return handlePasswordSavePage(h, request), nil
 	case "/status":
 		switch strings.ToLower(strings.TrimSpace(request.Query.Get("action"))) {
 		case "refresh-catalog":
@@ -276,14 +288,17 @@ func loginJSON(request pluginapi.ManagementRequest) pluginapi.ManagementResponse
 		"backup": "手动短信：GET ?action=sms&state=…；?action=send&state=…&phone=13800138000 发送验证码；" +
 			"?action=code&state=…&digit=5 用数字链接输入；?action=verify&state=…&phone=…&code=123456 提交并保存凭据。" +
 			"号码也可以在本页用 ?action=phone&digit=… 输入，不需要改插件设置",
-		"auto_sms": "同 primary",
-		"phone_gate":  "^1[3-9]\\d{9}$",
-		"wechat_app":  WechatAppID,
-		"redirect":    WechatRedirectURI,
-		"poll_url":    WechatLongPollURL,
-		"no_forms":    "resource 路由只派发 GET：所有动作都是查询串链接，页面没有表单也没有脚本",
-		"no_refresh":  "Loomy 没有 refresh_token：auth.refresh 只做有效性探测",
-		"callback404": "微信回调页是白名单占位、本身 404；授权码由长轮询取得，不经过回调页",
+		"auto_sms":   "同 primary",
+		"phone_gate": "^1[3-9]\\d{9}$",
+		"wechat_app": WechatAppID,
+		"redirect":   WechatRedirectURI,
+		"poll_url":   WechatLongPollURL,
+		"no_forms":   "resource 路由只派发 GET：登录资源页没有表单；密码登录和保存密码在 /v0/management/loomy/pwdlogin 与 /pwdsave（支持 POST）",
+		"no_refresh": "Loomy 没有 refresh_token：auth.refresh 在已保存密码时用密码重登（不足 4 天或探活失败），否则只做有效性探测",
+		"password": "POST /v0/management/loomy/pwdlogin {phone,password} 登录；POST /v0/management/loomy/pwdsave 把密码附到登录会话或已有凭据。" +
+			"上游没有设密码接口，此处只保存已在官方客户端设置过的密码，加密写入本地凭据。",
+		"sms_auto_password": "POST /v0/management/loomy/sms/auto 的 body 可带 password，登录成功后随凭据加密保存。",
+		"callback404":       "微信回调页是白名单占位、本身 404；授权码由长轮询取得，不经过回调页",
 	})
 }
 

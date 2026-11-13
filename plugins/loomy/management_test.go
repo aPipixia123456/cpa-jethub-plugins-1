@@ -31,7 +31,7 @@ func TestManagementRegistrationHasNoMenuAndNoLooseRoutes(t *testing.T) {
 	for _, route := range registration.Routes {
 		if route.Menu != "" {
 			menus[route.Method+" "+route.Path] = route.Menu
-		} else if route.Method+" "+route.Path != "POST /loomy/scan" && route.Method+" "+route.Path != "POST /loomy/sms/auto" {
+		} else if !isAllowedMenulessRoute(route.Method, route.Path) {
 			t.Errorf("route %s %s has no Menu and is not a provider-prefixed script path", route.Method, route.Path)
 		}
 	}
@@ -255,4 +255,16 @@ func countPosts(fake *fakeHost, match string) int {
 		}
 	}
 	return count
+}
+
+func isAllowedMenulessRoute(method, path string) bool {
+	key := method + " " + path
+	switch key {
+	case "POST /loomy/scan",
+		"POST /loomy/sms/auto",
+		"GET /loomy/pwdlogin", "POST /loomy/pwdlogin",
+		"GET /loomy/pwdsave", "POST /loomy/pwdsave":
+		return true
+	}
+	return false
 }

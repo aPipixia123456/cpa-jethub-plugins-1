@@ -25,11 +25,35 @@ import (
 //
 // Every outbound call goes through the host so proxy, TLS and request logging
 // stay under the host's control; the plugin never opens a socket itself.
-func hostRequest(h *abiboot.Host, method, rawURL string, headers http.Header, body []byte, _ Config) (*pluginapi.HTTPResponse, error) {
+func hostRequest(h *abiboot.Host, method, rawURL string, headers http.Header, body []byte, cfg Config) (*pluginapi.HTTPResponse, error) {
+	if impersonatedDo != nil {
+		timeout := time.Duration(cfg.requestTimeout()) * time.Millisecond
+		return impersonatedDo(abiboot.HTTPDoRequest{Method: method, URL: rawURL, Headers: headers, Body: body}, cfg.ProxyURL, timeout)
+	}
 	if h == nil {
 		return nil, transportError("host_unavailable", "插件未通过宿主调用（缺少 host 句柄）")
 	}
 	return h.HTTPDo(abiboot.HTTPDoRequest{Method: method, URL: rawURL, Headers: headers, Body: body})
+}
+
+// cfgForCredential overlays a credential's proxy_url onto the process config.
+func cfgForCredential(cfg Config, credential *Credential) Config {
+	if credential != nil {
+		if proxy := strings.TrimSpace(credential.ProxyURL); proxy != "" {
+			cfg.ProxyURL = proxy
+		}
+	}
+	return cfg
+}
+
+// applyGatewayHeaders adds the official-client User-Agent and loomy-version
+// every gateway request must carry (Loomy2api-CPAMC setAuthHeaders). The
+// `loomy-version` name is set through the map so it stays lowercase on the
+// wire, matching `token`.
+func applyGatewayHeaders(headers http.Header) {
+	cfg := settings()
+	headers.Set("User-Agent", cfg.clientUA())
+	headers["loomy-version"] = []string{cfg.loomyVersion()}
 }
 
 // chatHeaders is `loomyChatHeaders` (`loomy.ts:225-231`).
@@ -49,6 +73,7 @@ func chatHeaders(credential *Credential) http.Header {
 	// the source is lowercase (`loomy.ts:214,230`), and the host writes map keys
 	// verbatim.
 	headers["token"] = []string{session}
+	applyGatewayHeaders(headers)
 	return headers
 }
 
@@ -67,6 +92,7 @@ func businessHeaders(credential *Credential, withBody bool) http.Header {
 	if withBody {
 		headers.Set("Content-Type", "application/json")
 	}
+	applyGatewayHeaders(headers)
 	return headers
 }
 
@@ -206,17 +232,36 @@ func performInfer(h *abiboot.Host, request pluginapi.ExecutorRequest, credential
 	// Resolve the same id the body will send, so a prefixed or legacy name still
 	// finds the levels the catalogue declares for the upstream model.
 	efforts, _ := declaredEffortsFor(h, credential, cfg, bareUpstreamModel(request.Model))
+	if credential != nil && credential.PlatformDisabled {
+		markPlatformDisabled(h, request.AuthID, credential)
+		return nil, accountDisabledError("推理", "账号已被平台停用")
+	}
+	if errPaused := riskPausedError(); errPaused != nil {
+		return nil, errPaused
+	}
 	body, errBody := chatRequestBody(request, efforts)
 	if errBody != nil {
 		return nil, errBody
 	}
+	cfg = cfgForCredential(cfg, credential)
 	response, errDo := hostRequest(h, http.MethodPost, APIBase+ChatCompletionsPath, chatHeaders(credential), body, cfg)
 	if errDo != nil {
 		return nil, transportError("infer_transport", "连接 Loomy 推理服务失败：%v", errDo)
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, inferFailure(response)
+	// 100003 can arrive as HTTP 200 + a business envelope (the gateway
+	// often does that). Park the account here so the SSE parser cannot
+	// swallow it, and so CPA is told to switch accounts (403).
+	if response != nil {
+		if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil && parsed.isAccountDisabled() {
+			markPlatformDisabled(h, request.AuthID, credential)
+			return nil, accountDisabledError("推理", parsed.text())
+		}
 	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, inferFailure(response, credential, h, request.AuthID)
+	}
+	// HTTP 200 + other business envelopes (100002, TM.*) is classified
+	// after the SSE parse, in inferFrames / envelopeFailure.
 	return response, nil
 }
 
@@ -296,10 +341,29 @@ func chatRequestBody(request pluginapi.ExecutorRequest, efforts []string) ([]byt
 // The upstream status is normalised rather than passed through: the host uses it
 // to decide whether the request was at fault, and an upstream 403 says nothing
 // useful about that.
-func inferFailure(response *pluginapi.HTTPResponse) error {
+func inferFailure(response *pluginapi.HTTPResponse, credential *Credential, h *abiboot.Host, authID string) error {
 	detail := envelopeErrorText(response.Body)
+	// A 200-style envelope may be wrapped in a non-2xx HTTP status; 100003
+	// must still be distinguished from 100002 and from a 403 风控.
+	if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil {
+		if parsed.isAccountDisabled() {
+			markPlatformDisabled(h, authID, credential)
+			return accountDisabledError("推理", parsed.text())
+		}
+		if parsed.isAuthExpired() {
+			return credentialError("auth_expired", "Loomy 会话已失效（%s）%s", parsed.text(), credentialAdvice())
+		}
+	}
+	if isRiskRejection(response.StatusCode, "", string(response.Body)+detail) {
+		account := ""
+		if credential != nil {
+			account = credential.maskedPhone()
+		}
+		noteRisk(account, truncate(detail, 200))
+		return riskControlError(response.StatusCode, detail)
+	}
 	switch response.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return credentialError("auth", "Loomy 凭据无效（HTTP %d）：%s%s", response.StatusCode, detail, credentialAdvice())
 	case http.StatusPaymentRequired:
 		return statusError(false, "quota_exhausted", http.StatusPaymentRequired, "Loomy 积分不足：%s", detail)

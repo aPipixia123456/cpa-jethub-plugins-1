@@ -110,7 +110,7 @@ type onboardingOutcome struct {
 // it on mount, so it must never trigger a completion
 // (`jet-hub-rpc.ts:1187-1191`).
 func fetchOnboardingState(h *abiboot.Host, credential *Credential, cfg Config) (*onboardingState, error) {
-	response, errDo := hostRequest(h, http.MethodGet, APIBase+OnboardingTasksPath, businessHeaders(credential, false), nil, cfg)
+	response, errDo := hostRequest(h, http.MethodGet, APIBase+OnboardingTasksPath, businessHeaders(credential, false), nil, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return nil, transportError("onboarding_transport", "查询 Loomy 任务状态失败：%v", errDo)
 	}
@@ -160,7 +160,7 @@ func completeOnboardingTask(h *abiboot.Host, credential *Credential, key string,
 	if errMarshal != nil {
 		return false, statusError(false, "encode_task", http.StatusInternalServerError, "encode task body: %v", errMarshal)
 	}
-	response, errDo := hostRequest(h, http.MethodPost, APIBase+OnboardingCompletePath, businessHeaders(credential, true), body, cfg)
+	response, errDo := hostRequest(h, http.MethodPost, APIBase+OnboardingCompletePath, businessHeaders(credential, true), body, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return false, transportError("onboarding_complete_transport", "完成任务 %s 失败：%v", task.Key, errDo)
 	}

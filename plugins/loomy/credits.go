@@ -104,7 +104,7 @@ func numericField(source map[string]any, key string) (float64, bool) {
 // the transport failure or `HTTP_<status>`.
 func fetchPoints(h *abiboot.Host, credential *Credential, cfg Config) (*pointsSnapshot, error) {
 	rawURL := APIBase + PointsRecordsPath + "?" + pointsRecordsQuery()
-	response, errDo := hostRequest(h, http.MethodGet, rawURL, businessHeaders(credential, false), nil, cfg)
+	response, errDo := hostRequest(h, http.MethodGet, rawURL, businessHeaders(credential, false), nil, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return nil, transportError("points_transport", "查询 Loomy 积分失败（NETWORK）：%v", errDo)
 	}
@@ -170,7 +170,7 @@ type grantOutcome struct {
 // batch (`loomy-credits.ts:206,217-221`).
 func claimDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) grantOutcome {
 	body := []byte("{}")
-	response, errDo := hostRequest(h, http.MethodPost, APIBase+PointsFirstLoginPath, businessHeaders(credential, true), body, cfg)
+	response, errDo := hostRequest(h, http.MethodPost, APIBase+PointsFirstLoginPath, businessHeaders(credential, true), body, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return grantOutcome{Status: "failed", Message: "初始化每日额度失败：" + errDo.Error()}
 	}
@@ -278,11 +278,15 @@ func ensureDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) {
 //     HTTP status.
 func probeCredential(h *abiboot.Host, credential *Credential, cfg Config) error {
 	rawURL := APIBase + PointsRecordsPath + "?" + pointsRecordsQuery()
-	response, errDo := hostRequest(h, http.MethodGet, rawURL, businessHeaders(credential, false), nil, cfg)
+	response, errDo := hostRequest(h, http.MethodGet, rawURL, businessHeaders(credential, false), nil, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return transportError("probe_transport", "探测 Loomy 凭据失败（网络问题，不代表凭据失效）：%v", errDo)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if isRiskRejection(response.StatusCode, "", string(response.Body)) {
+			noteRisk(credential.maskedPhone(), truncate(string(response.Body), 200))
+			return riskControlError(response.StatusCode, truncate(string(response.Body), 200))
+		}
 		return transportError("probe_status", "探测 Loomy 凭据失败（HTTP_%d）：%s",
 			response.StatusCode, truncate(string(response.Body), 200))
 	}
@@ -295,6 +299,13 @@ func probeCredential(h *abiboot.Host, credential *Credential, cfg Config) error 
 	}
 	if parsed.isAuthExpired() {
 		return credentialError("credential_expired", "Loomy 凭证已失效，请重新登录%s", credentialAdvice())
+	}
+	if parsed.isAccountDisabled() {
+		return accountDisabledError("探测", parsed.text())
+	}
+	if isRiskRejection(0, parsed.code(), parsed.text()) {
+		noteRisk(credential.maskedPhone(), truncate(parsed.text(), 200))
+		return riskControlError(http.StatusForbidden, parsed.text())
 	}
 	return transportError("probe_business_error", "探测 Loomy 凭据失败（code %s）：%s", parsed.code(), parsed.text())
 }

@@ -42,6 +42,10 @@ const (
 	// disabledByManual marks a credential disabled through this plugin's own
 	// page, which the scanner must not resurrect either.
 	disabledByManual = "loomypool:manual"
+	// disabledByPlatform marks a credential the pool (or auth.refresh)
+	// parked because upstream returned 100003 (account banned). Auto-enable
+	// never clears this marker.
+	disabledByPlatform = "loomy:platform"
 )
 
 // Config is the per-instance plugin configuration, decoded from the
@@ -71,18 +75,31 @@ type Config struct {
 	// credential in the same pass it would otherwise have stayed parked. The
 	// claim is an upstream write, so it follows the Enabled switch.
 	AutoCheckin bool
+	// CheckinWindowStart / CheckinWindowEnd bound the daily auto-check-in
+	// window in Asia/Shanghai (default 00:10–06:00). Each account is
+	// assigned a stable time inside the window for the business day.
+	CheckinWindowStart string
+	CheckinWindowEnd   string
+	// CheckinGapMinMS / CheckinGapMaxMS bound the random pause between
+	// serial claims in one sweep (milliseconds). 0 disables the gap.
+	CheckinGapMinMS int
+	CheckinGapMaxMS int
 }
 
 // DefaultConfig returns the settings used when the user provides nothing.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:        true,
-		HostBaseURL:    DefaultHostBaseURL,
-		ScanIntervalMS: DefaultScanIntervalMS,
-		MinRemaining:   0,
-		AutoDisable:    true,
-		AutoEnable:     true,
-		AutoCheckin:    true,
+		Enabled:            true,
+		HostBaseURL:        DefaultHostBaseURL,
+		ScanIntervalMS:     DefaultScanIntervalMS,
+		MinRemaining:       0,
+		AutoDisable:        true,
+		AutoEnable:         true,
+		AutoCheckin:        true,
+		CheckinWindowStart: DefaultCheckinWindowStart,
+		CheckinWindowEnd:   DefaultCheckinWindowEnd,
+		CheckinGapMinMS:    DefaultCheckinGapMinMS,
+		CheckinGapMaxMS:    DefaultCheckinGapMaxMS,
 	}
 }
 
@@ -112,6 +129,10 @@ func ConfigFromMap(raw map[string]any, prefix string) Config {
 	cfg.AutoDisable = coerceBool(raw[prefix+"auto_disable"], cfg.AutoDisable)
 	cfg.AutoEnable = coerceBool(raw[prefix+"auto_enable"], cfg.AutoEnable)
 	cfg.AutoCheckin = coerceBool(raw[prefix+"auto_checkin"], cfg.AutoCheckin)
+	cfg.CheckinWindowStart = coerceString(raw[prefix+"checkin_window_start"], cfg.CheckinWindowStart)
+	cfg.CheckinWindowEnd = coerceString(raw[prefix+"checkin_window_end"], cfg.CheckinWindowEnd)
+	cfg.CheckinGapMinMS = coerceInt(raw[prefix+"checkin_gap_min_ms"], cfg.CheckinGapMinMS)
+	cfg.CheckinGapMaxMS = coerceInt(raw[prefix+"checkin_gap_max_ms"], cfg.CheckinGapMaxMS)
 	return cfg
 }
 
@@ -212,7 +233,15 @@ func ConfigFields() []configField {
 		{Name: "auto_enable", Type: "boolean",
 			Description: "账号恢复积分后自动重新启用——只解除本插件写入的停用标记，手工停用不受影响"},
 		{Name: "auto_checkin", Type: "boolean",
-			Description: "巡检时自动为每个账号领取当日赠送额度（daily_cycle_date 不是今天才调用，含被本插件停用的账号——签到回血是复活路径）。受 enabled 总开关约束"},
+			Description: "巡检时自动为每个账号领取当日赠送额度（每个账号在窗口内有一个按天稳定的随机时刻，默认 00:10–06:00 Asia/Shanghai，避免 00:00 扎堆；窗口结束后补签。含被本插件停用的账号——签到回血是复活路径）。受 enabled 总开关约束"},
+		{Name: "checkin_window_start", Type: "string",
+			Description: "自动签到窗口开始时间（默认 00:10，Asia/Shanghai）"},
+		{Name: "checkin_window_end", Type: "string",
+			Description: "自动签到窗口结束时间（默认 06:00，Asia/Shanghai）。窗口结束后仍未签到的账号会补签"},
+		{Name: "checkin_gap_min_ms", Type: "integer",
+			Description: "同一轮巡检中两个账号签到之间的最小随机间隔，毫秒（默认 2000；0 关闭间隔）"},
+		{Name: "checkin_gap_max_ms", Type: "integer",
+			Description: "同一轮巡检中两个账号签到之间的最大随机间隔，毫秒（默认 15000）"},
 	}
 }
 

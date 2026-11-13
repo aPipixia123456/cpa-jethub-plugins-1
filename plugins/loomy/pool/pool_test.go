@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/collegeming/cpa-jethub-plugins/internal/abiboot"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -234,6 +235,15 @@ func TestIsLoomyEntryAcceptsLegacyType(t *testing.T) {
 }
 
 // ── scanner ──
+// instantCheckin widens the daily window so claim-expecting tests do not
+// depend on the wall clock sitting after an account's scheduled slot.
+func instantCheckin(cfg Config) Config {
+	cfg.CheckinWindowStart = "00:00"
+	cfg.CheckinWindowEnd = "00:01"
+	cfg.CheckinGapMinMS = 0
+	cfg.CheckinGapMaxMS = 0
+	return cfg
+}
 
 func TestScanDisablesExhaustedAccount(t *testing.T) {
 	fake := newFakePool(
@@ -367,7 +377,7 @@ func TestScanClaimsAndRevivesSameSweep(t *testing.T) {
 	fake.checkinBody = `{"status":"ok","message":"已签到","balance":50,"daily_balance":1000}`
 	fake.install(t)
 
-	outcome := runScan(testHost(), DefaultConfig(), "auto")
+	outcome := runScan(testHost(), instantCheckin(DefaultConfig()), "auto")
 	if outcome.Error != "" {
 		t.Fatalf("scan error: %s", outcome.Error)
 	}
@@ -404,7 +414,7 @@ func TestScanClaimSessionDeadDisables(t *testing.T) {
 	fake.checkinBody = `{"status":"error","error":"Loomy 返回错误 100002：会话已失效"}`
 	fake.install(t)
 
-	outcome := runScan(testHost(), DefaultConfig(), "auto")
+	outcome := runScan(testHost(), instantCheckin(DefaultConfig()), "auto")
 	if len(fake.saves) != 1 || fake.saves[0].JSON["disabled_by"] != disabledBySession {
 		t.Fatalf("saves = %+v, want one disable write marked %s", fake.saves, disabledBySession)
 	}
@@ -508,16 +518,27 @@ func TestManagementRegisterAdvertisesScanOnly(t *testing.T) {
 // ── pure helpers ──
 
 func TestCheckinDueBoundaries(t *testing.T) {
+	cfg := instantCheckin(DefaultConfig())
+	loc := BusinessLocation()
+	afternoon := time.Date(2026, 11, 13, 15, 0, 0, 0, loc)
 	due := accountDoc("a", "i", pointsDoc(10, "2000-01-01"))
-	if !checkinDue(statusAccount{Points: mustPoints(due)}) {
-		t.Error("stale cycle should be due")
+	if !checkinDueAt(statusAccount{Points: mustPoints(due)}, afternoon, cfg) {
+		t.Error("stale cycle should be due once the scheduled slot arrives")
 	}
-	if !checkinDue(statusAccount{}) {
+	if !checkinDueAt(statusAccount{}, afternoon, cfg) {
 		t.Error("missing points should be due (claim is the only probe)")
 	}
 	fresh := accountDoc("a", "i", pointsDoc(10, "2999-01-01"))
-	if checkinDue(statusAccount{Points: mustPoints(fresh)}) {
+	if checkinDueAt(statusAccount{Points: mustPoints(fresh)}, afternoon, cfg) {
 		t.Error("future cycle should not be due")
+	}
+	// Before the window starts, even a stale cycle waits.
+	narrow := DefaultConfig()
+	narrow.CheckinWindowStart = "00:10"
+	narrow.CheckinWindowEnd = "06:00"
+	pre := time.Date(2026, 11, 13, 0, 5, 0, 0, loc)
+	if checkinDueAt(statusAccount{Points: mustPoints(due)}, pre, narrow) {
+		t.Error("00:05 is before the 00:10 window and must not claim")
 	}
 }
 
@@ -551,9 +572,17 @@ func TestSessionDeadErrorMatchesCodeOnly(t *testing.T) {
 			t.Errorf("%q should be a dead-session error", text)
 		}
 	}
-	for _, text := range []string{"网络超时", "Loomy 返回错误 100001：参数错误"} {
+	for _, text := range []string{
+		"网络超时",
+		"Loomy 返回错误 100001：参数错误",
+		"账号已被平台停用（100003）",
+		"Loomy 返回错误 100003：账号已停用",
+	} {
 		if sessionDeadError(text) {
-			t.Errorf("%q is a retryable error, not session death", text)
+			t.Errorf("%q must not be classified as session death", text)
 		}
+	}
+	if !platformDisabledError("账号已被平台停用（100003）") {
+		t.Error("100003 must be recognised as a platform disable")
 	}
 }

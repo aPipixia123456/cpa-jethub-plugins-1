@@ -274,22 +274,68 @@ func randomUUID() string {
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }
 
-// accountBody marshals one account request.
+// accountIdentity is the client identity written into the login envelope
+// (`base.ua` and `base.devid`). The UA must match the gateway User-Agent;
+// the device id is a stable per-phone hash so a pool does not look like one
+// shared "web" device.
+type accountIdentity struct {
+	UA       string
+	DeviceID string
+}
+
+func identityFor(cfg Config, seed string) accountIdentity {
+	id := accountIdentity{UA: cfg.clientUA(), DeviceID: deviceIDFor(seed)}
+	if id.DeviceID == "" {
+		id.DeviceID = AccountDeviceID
+	}
+	return id
+}
+
+func phoneFromParam(param any) string {
+	switch v := param.(type) {
+	case sendMsgCodeParam:
+		return v.Phone
+	case checkCodeParam:
+		return v.Phone
+	case bindSendMsgParam:
+		return v.Phone
+	case byPwdParam:
+		return v.LoginID
+	}
+	return ""
+}
+
+// accountBody marshals one account request with the default identity
+// (settings UA, device id from the param's phone when present). Tests that
+// pin the wire shape pass an explicit identity through accountBodyIdent.
+func accountBody(param any, traceID string) ([]byte, error) {
+	return accountBodyIdent(param, traceID, identityFor(settings(), phoneFromParam(param)))
+}
+
+// accountBodyIdent marshals one account request.
 //
 // The bytes returned here are BOTH signed and sent — never re-marshalled later
 // (`loomy-oauth.ts:84-92`, trap #4). The trace id is generated here so the
 // signature covers it.
-func accountBody(param any, traceID string) ([]byte, error) {
+func accountBodyIdent(param any, traceID string, id accountIdentity) ([]byte, error) {
 	if strings.TrimSpace(traceID) == "" {
 		traceID = randomTraceID()
+	}
+	ua := strings.TrimSpace(id.UA)
+	if ua == "" {
+		ua = AccountUA
+	}
+	devid := strings.TrimSpace(id.DeviceID)
+	if devid == "" {
+		devid = AccountDeviceID
 	}
 	body, errMarshal := json.Marshal(accountRequestBody{
 		Base: accountBasePayload{
 			AppID:    AccountAppID,
 			ModelID:  AccountModelID,
 			Version:  AccountClientVersion,
-			DeviceID: AccountDeviceID,
-			UA:       AccountUA,
+			DeviceID: devid,
+			UA:       ua,
 			TraceID:  traceID,
 		},
 		Param: param,
@@ -306,7 +352,11 @@ func accountBody(param any, traceID string) ([]byte, error) {
 // failure; the account host answers business failures inside the envelope, so the
 // envelope is parsed even for a non-2xx status when it is well-formed.
 func accountCall(h *abiboot.Host, cfg Config, path string, param any, now time.Time) (*envelope, error) {
-	body, errBody := accountBody(param, randomTraceID())
+	return accountCallIdent(h, cfg, path, param, now, identityFor(cfg, phoneFromParam(param)))
+}
+
+func accountCallIdent(h *abiboot.Host, cfg Config, path string, param any, now time.Time, id accountIdentity) (*envelope, error) {
+	body, errBody := accountBodyIdent(param, randomTraceID(), id)
 	if errBody != nil {
 		return nil, errBody
 	}

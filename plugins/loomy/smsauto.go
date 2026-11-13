@@ -45,6 +45,8 @@ func loginAutoConfirmPage(cfg Config, request pluginapi.ManagementRequest, sessi
 			),
 		),
 			plugui.Action{Label: "确认自动接码登录", Query: "action=" + autoActionRun + "&state=" + state, Kind: "primary"},
+			plugui.Action{Label: "先填写续登密码（可选）", Path: passwordSavePath, Query: "state=" + state},
+			plugui.Action{Label: "用手机号+密码登录", Path: passwordLoginPath, Query: "state=" + state},
 			plugui.Action{Label: "改用手动短信", Query: "action=sms&state=" + state},
 			plugui.Action{Label: "返回状态", Path: "status"},
 		),
@@ -109,6 +111,9 @@ func runAutoSMSLogin(h *abiboot.Host, cfg Config, session *loginSession, now tim
 		return nil, phone, errCheck
 	}
 	credential := buildCredential(sessionToken, userID, phone, "", cfg, now)
+	if password := session.passwordValue(); password != "" {
+		credential.SetPassword(password)
+	}
 	if errStore := storeLoginCredential(h, cfg, session, credential, "自动接码登录成功，账号已保存"); errStore != nil {
 		return nil, phone, errStore
 	}
@@ -146,12 +151,17 @@ func waitForSMSCode(pool *smsPool, phone string, waitMS int) (string, error) {
 func handleSMSAutoJSON(h *abiboot.Host, request pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 	cfg := settings()
 	state := strings.TrimSpace(request.Query.Get("state"))
-	if state == "" && len(request.Body) > 0 {
+	var postedPassword string
+	if state == "" && len(request.Body) > 0 || len(request.Body) > 0 {
 		var body struct {
-			State string `json:"state"`
+			State    string `json:"state"`
+			Password string `json:"password"`
 		}
 		_ = json.Unmarshal(request.Body, &body)
-		state = strings.TrimSpace(body.State)
+		if state == "" {
+			state = strings.TrimSpace(body.State)
+		}
+		postedPassword = body.Password
 	}
 	var session *loginSession
 	var ok bool
@@ -160,6 +170,9 @@ func handleSMSAutoJSON(h *abiboot.Host, request pluginapi.ManagementRequest) plu
 	}
 	if !ok || session == nil {
 		session = startLoginSession(cfg, "")
+	}
+	if postedPassword != "" {
+		session.notePassword(postedPassword)
 	}
 	credential, phone, errRun := runAutoSMSLogin(h, cfg, session, time.Now())
 	if errRun != nil {
