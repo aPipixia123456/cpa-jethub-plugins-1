@@ -115,6 +115,9 @@ func fetchOnboardingState(h *abiboot.Host, credential *Credential, cfg Config) (
 		return nil, transportError("onboarding_transport", "查询 Loomy 任务状态失败：%v", errDo)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil && !parsed.success() {
+			return nil, envelopeFailure("查询 Loomy 任务状态", parsed)
+		}
 		return nil, transportError("onboarding_status", "查询 Loomy 任务状态失败（HTTP %d）：%s",
 			response.StatusCode, truncate(string(response.Body), 200))
 	}
@@ -165,6 +168,9 @@ func completeOnboardingTask(h *abiboot.Host, credential *Credential, key string,
 		return false, transportError("onboarding_complete_transport", "完成任务 %s 失败：%v", task.Key, errDo)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil && !parsed.success() {
+			return false, envelopeFailure("完成任务 "+task.Key, parsed)
+		}
 		return false, transportError("onboarding_complete_status", "完成任务 %s 失败（HTTP %d）：%s",
 			task.Key, response.StatusCode, truncate(string(response.Body), 200))
 	}

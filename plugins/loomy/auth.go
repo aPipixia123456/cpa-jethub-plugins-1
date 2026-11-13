@@ -172,6 +172,22 @@ func markPlatformDisabled(h *abiboot.Host, fileName string, credential *Credenti
 	}
 }
 
+// parkIfAccountDisabled persists a 100003 platform ban so CPA stops
+// routing to the account. It is a no-op for any other error (including
+// nil) and never starts a re-login. The same error is returned unchanged.
+func parkIfAccountDisabled(h *abiboot.Host, fileName string, credential *Credential, err error) error {
+	if isAccountDisabledErr(err) {
+		markPlatformDisabled(h, fileName, credential)
+	}
+	return err
+}
+
+// authFileName is the host identity used to park a credential: the auth
+// file name when the host provides one, otherwise the runtime index.
+func authFileName(entry pluginapi.HostAuthFileEntry) string {
+	return firstNonEmpty(strings.TrimSpace(entry.Name), strings.TrimSpace(entry.AuthIndex), strings.TrimSpace(entry.ID))
+}
+
 // nextProbeAfter decides when the host should probe again.
 //
 // A credential with no local expiry gets no schedule at all: there is nothing to

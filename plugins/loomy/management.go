@@ -319,7 +319,7 @@ func checkinJSON(h *abiboot.Host, request pluginapi.ManagementRequest) pluginapi
 			"hint":   "追加 &action=claim 才会真正调用 POST /points/first-login（写接口）",
 		})
 	}
-	outcome := claimDailyGrant(h, credential, settings())
+	outcome := claimDailyGrantFor(h, credential, settings(), authFileName(entry))
 	body := map[string]any{
 		"status":  outcome.Status,
 		"message": outcome.Message,
@@ -347,6 +347,7 @@ func onboardingJSON(h *abiboot.Host, request pluginapi.ManagementRequest) plugin
 	if !strings.EqualFold(strings.TrimSpace(request.Query.Get("action")), "claim") {
 		state, errState := fetchOnboardingState(h, credential, cfg)
 		if errState != nil {
+			parkIfAccountDisabled(h, authFileName(entry), credential, errState)
 			return jsonManagementResponse(statusOf(errState, http.StatusBadGateway),
 				map[string]any{"error": errState.Error()})
 		}
@@ -361,6 +362,7 @@ func onboardingJSON(h *abiboot.Host, request pluginapi.ManagementRequest) plugin
 	if key := strings.TrimSpace(request.Query.Get("key")); key != "" {
 		already, errComplete := completeOnboardingTask(h, credential, key, cfg)
 		if errComplete != nil {
+			parkIfAccountDisabled(h, authFileName(entry), credential, errComplete)
 			return jsonManagementResponse(statusOf(errComplete, http.StatusBadGateway),
 				map[string]any{"error": errComplete.Error()})
 		}
@@ -370,6 +372,7 @@ func onboardingJSON(h *abiboot.Host, request pluginapi.ManagementRequest) plugin
 	}
 	outcome, errOutcome := claimAllOnboarding(h, credential, cfg)
 	if errOutcome != nil {
+		parkIfAccountDisabled(h, authFileName(entry), credential, errOutcome)
 		return jsonManagementResponse(statusOf(errOutcome, http.StatusBadGateway),
 			map[string]any{"error": errOutcome.Error(), "earned": outcome.Earned})
 	}

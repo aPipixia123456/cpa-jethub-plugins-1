@@ -109,6 +109,9 @@ func fetchPoints(h *abiboot.Host, credential *Credential, cfg Config) (*pointsSn
 		return nil, transportError("points_transport", "查询 Loomy 积分失败（NETWORK）：%v", errDo)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil && !parsed.success() {
+			return nil, envelopeFailure("查询 Loomy 积分", parsed)
+		}
 		return nil, transportError("points_status", "查询 Loomy 积分失败（HTTP_%d）：%s",
 			response.StatusCode, truncate(string(response.Body), 200))
 	}
@@ -169,12 +172,25 @@ type grantOutcome struct {
 // This function never returns an error: one bad account must not interrupt a
 // batch (`loomy-credits.ts:206,217-221`).
 func claimDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) grantOutcome {
+	return claimDailyGrantFor(h, credential, cfg, "")
+}
+
+// claimDailyGrantFor is claimDailyGrant, and parks the credential when
+// upstream returns 100003 and fileName is known.
+func claimDailyGrantFor(h *abiboot.Host, credential *Credential, cfg Config, fileName string) grantOutcome {
+	failed := func(err error) grantOutcome {
+		parkIfAccountDisabled(h, fileName, credential, err)
+		return grantOutcome{Status: "failed", Message: err.Error()}
+	}
 	body := []byte("{}")
 	response, errDo := hostRequest(h, http.MethodPost, APIBase+PointsFirstLoginPath, businessHeaders(credential, true), body, cfgForCredential(cfg, credential))
 	if errDo != nil {
 		return grantOutcome{Status: "failed", Message: "初始化每日额度失败：" + errDo.Error()}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if parsed, errEnv := parseEnvelope(response.Body); errEnv == nil && !parsed.success() {
+			return failed(envelopeFailure("初始化每日额度", parsed))
+		}
 		return grantOutcome{Status: "failed", Message: fmt.Sprintf("初始化每日额度失败（HTTP %d）：%s",
 			response.StatusCode, truncate(string(response.Body), 200))}
 	}
@@ -183,7 +199,7 @@ func claimDailyGrant(h *abiboot.Host, credential *Credential, cfg Config) grantO
 		return grantOutcome{Status: "failed", Message: "初始化每日额度失败：" + errEnvelope.Error()}
 	}
 	if !parsed.success() {
-		return grantOutcome{Status: "failed", Message: "初始化每日额度失败：" + parsed.text()}
+		return failed(envelopeFailure("初始化每日额度", parsed))
 	}
 	var data map[string]any
 	if errDecode := parsed.decodeData(&data); errDecode != nil {
@@ -421,6 +437,12 @@ func collectQuotas(h *abiboot.Host, accounts []pluginapi.HostAuthFileEntry, cfg 
 		}
 		quota.Credential = credential
 		snapshot, fetched, errPoints := readPoints(h, credential, cfg, freshness)
+		if isAccountDisabledErr(errPoints) {
+			// Status / points reads must park just like chat and auth.refresh:
+			// leaving a confirmed 100003 account enabled lets CPA keep routing
+			// to it until the pool happens to sweep.
+			parkIfAccountDisabled(h, authFileName(entry), credential, errPoints)
+		}
 		switch {
 		case errPoints != nil:
 			quota.PointsErr = errPoints

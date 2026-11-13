@@ -157,7 +157,7 @@ func handleExecutorExecute(h *abiboot.Host, raw json.RawMessage) (any, error) {
 	}
 	payloads, errFrames := inferFrames(response.Body)
 	if errFrames != nil {
-		return nil, errFrames
+		return nil, parkIfAccountDisabled(h, request.AuthID, credential, errFrames)
 	}
 	completion, truncated := aggregateFrames(payloads, request.Model)
 	payload, errMarshal := json.Marshal(completion)
@@ -191,7 +191,7 @@ func handleExecutorExecuteStream(h *abiboot.Host, raw json.RawMessage) (any, err
 	}
 	frames, truncated, errFrames := streamFrames(response.Body)
 	if errFrames != nil {
-		return nil, errFrames
+		return nil, parkIfAccountDisabled(h, request.AuthID, credential, errFrames)
 	}
 	if truncated && h != nil {
 		h.Log("warn", "Loomy 流未正常结束（缺少 finish_reason 与 [DONE]）", map[string]any{
@@ -458,6 +458,9 @@ func errorFrameIn(payload string) error {
 	// Shape 2: a business envelope with no choices. Loomy's own envelope spells
 	// the text `desc`, so that is read as well (`envelope.text`).
 	if code := strings.TrimSpace(probe.Code.String()); code != "" && code != okCode {
+		if code == accountDisabledCode {
+			return accountDisabledError("推理", firstNonEmpty(probe.Message, probe.Msg, probe.Desc))
+		}
 		if message := firstNonEmpty(probe.Message, probe.Msg, probe.Desc); message != "" {
 			return statusError(false, "upstream_error", http.StatusBadGateway, "Loomy 上游错误 %s：%s", code, message)
 		}

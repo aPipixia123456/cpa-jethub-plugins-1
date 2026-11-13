@@ -940,7 +940,7 @@ func renderCheckinPage(h *abiboot.Host, request pluginapi.ManagementRequest) plu
 				plugui.Action{Label: "返回状态", Path: "status"},
 			))
 	}
-	outcome := claimDailyGrant(h, credential, settings())
+	outcome := claimDailyGrantFor(h, credential, settings(), authFileName(entry))
 	fields := []plugui.Field{{Label: "账号", Value: entry.Name}}
 	if outcome.Credit > 0 {
 		fields = append(fields, plugui.Field{Label: "本次额度", Value: trimAmount(outcome.Credit)})
@@ -1001,6 +1001,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 	case "claim":
 		outcome, errOutcome := claimAllOnboarding(h, credential, cfg)
 		if errOutcome != nil {
+			parkIfAccountDisabled(h, authFileName(entry), credential, errOutcome)
 			notice = plugui.Notice("danger", "领取失败："+errOutcome.Error())
 		} else if len(outcome.Claimed) == 0 {
 			notice = plugui.Notice("", outcome.Message)
@@ -1013,6 +1014,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 		already, errComplete := completeOnboardingTask(h, credential, key, cfg)
 		switch {
 		case errComplete != nil:
+			parkIfAccountDisabled(h, authFileName(entry), credential, errComplete)
 			notice = plugui.Notice("danger", "提交失败："+errComplete.Error())
 		case already:
 			notice = plugui.Notice("", "该任务此前已完成（alreadyCompleted=true，同样算成功）")
@@ -1023,6 +1025,7 @@ func renderOnboardingPage(h *abiboot.Host, request pluginapi.ManagementRequest) 
 
 	state, errState := fetchOnboardingState(h, credential, cfg)
 	if errState != nil {
+		parkIfAccountDisabled(h, authFileName(entry), credential, errState)
 		return pluguiPage("Loomy 一次性任务",
 			plugui.Card("任务状态读取失败",
 				plugui.Group(notice, plugui.Notice("danger", errState.Error())),

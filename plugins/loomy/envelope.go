@@ -179,10 +179,11 @@ func envelopeFailure(op string, env *envelope) error {
 	return transportError("upstream_business_error", "%s 失败（code %s）：%s", op, env.code(), message)
 }
 
-// accountDisabledError marks the account as platform-disabled. The 403
-// tells the host to stop using this credential and pick another; it is
-// deliberately not a 401, so a password-backed refresh will not treat it
-// as "session expired, try logging in again".
+// accountDisabledError is the 403 returned for upstream 100003. It does
+// not itself persist the park: callers that have a host and a file name
+// must also call parkIfAccountDisabled (or markPlatformDisabled) so CPA
+// stops routing to the account. The 403 (not 401) keeps a password-backed
+// refresh from treating this as "session expired, try logging in again".
 func accountDisabledError(op, message string) error {
 	if message == "" {
 		message = "账号已被平台停用"
